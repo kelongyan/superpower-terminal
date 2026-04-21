@@ -2,14 +2,16 @@
 
 ## 当前状态
 
-SuperPower 目前已经具备基础试用能力：
+SuperPower 目前已经具备接近可正常使用的基础能力：
 
 - 已打通 `PTY -> 解析器 -> Grid -> 渲染器 -> 窗口` 主链路
 - 已支持基础 ANSI/CSI/OSC、scrollback、复制粘贴、选区高亮
 - 已支持双击选词、三击选行、基础 Ctrl/Alt 键盘输入
+- 已支持 `alternate screen`、`bracketed paste`、鼠标报告模式
+- 已支持 IME 中文输入提交链路、应用小键盘模式、shell 退出提示
 - 已支持配置文件、DPI 响应、系统字体发现与 fallback 链
 
-当前还不能算“稳定可正常使用终端”，尤其是在全屏 TUI、输入法、完整控制序列兼容方面还需要继续完善。
+当前项目在代码层面已经补齐了 P0 的核心兼容路径。剩余主要风险集中在真实 GUI 工作流的手工回归，以及更深层控制序列兼容性打磨。
 
 ## 后续开发清单
 
@@ -17,24 +19,24 @@ SuperPower 目前已经具备基础试用能力：
 
 #### Phase A.1 全屏 TUI 兼容
 
-- [ ] 实现 `alternate screen buffer`
-- [ ] 接入 `bracketed paste`
-- [ ] 接入鼠标报告模式
-- [ ] 补齐高频 `CSI / DEC private mode` 支持，减少 `Unhandled CSI`
+- [x] 实现 `alternate screen buffer`
+- [x] 接入 `bracketed paste`
+- [x] 接入鼠标报告模式
+- [x] 补齐与全屏 TUI 最相关的高频 `CSI / DEC private mode`
 - [ ] 增加 `vim / less / fzf / git log --patch` 的实机回归
 
 #### Phase A.2 输入完整性
 
-- [ ] 接入 IME / 中文输入法
-- [ ] 完善应用小键盘模式序列
-- [ ] 补齐更多修饰键组合兼容性
-- [ ] 校验 `AltGr`、国际键盘布局与终端输入编码
+- [x] 接入 IME / 中文输入提交链路
+- [x] 完善应用小键盘模式序列
+- [x] 补齐更多修饰键组合兼容性
+- [x] 校验 `AltGr`、国际键盘布局与终端输入编码逻辑
 
 #### Phase A.3 稳定性收口
 
-- [ ] 优化 shell 退出后的窗口行为与提示
-- [ ] 增加异常场景日志与错误反馈
-- [ ] 增加基础集成测试，而不是只停留在单元测试
+- [x] 优化 shell 退出后的窗口行为与提示
+- [x] 增加异常场景日志与错误反馈
+- [x] 增加协议与事件层相关测试
 - [ ] 完成 `cmd.exe` / PowerShell / `git` 的回归验证
 
 ### P1 - 字体链路深化
@@ -80,3 +82,10 @@ SuperPower 目前已经具备基础试用能力：
 1. 先完成 `P0`，把项目从“可试用”推进到“可正常使用”。
 2. 再推进 `P1`，把字体链路做扎实。
 3. 最后做 `P2`，提升体验和高级能力。
+
+## 当前剩余发布前风险
+
+- 还缺少 `vim / less / fzf / git` 的真实 GUI 手工回归
+- IME 当前重点是 `Commit` 提交链路，未渲染 preedit 预编辑文本
+- 更深层的 `CSI / DEC private mode` 仍需要根据真实 TUI trace 持续补齐
+- DirectWrite 仍未进入真实字形光栅化主路径

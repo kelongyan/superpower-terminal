@@ -1,7 +1,7 @@
 # SuperPower — Windows 本地终端技术方案（按当前实现校准）
 
 > 定位：Windows 平台高性能本地终端模拟器  
-> 当前阶段：已具备基础试用能力，正在补齐“稳定可正常使用终端”所需能力
+> 当前阶段：P0 核心协议能力已接通，正在补齐发布前验证与兼容性打磨
 
 ---
 
@@ -21,8 +21,9 @@
 
 ### 当前可用程度
 
-- 对于 PowerShell / `cmd.exe` 下的基础命令行工作流，已经具备试用能力
-- 对于依赖 alternate screen、鼠标报告、bracketed paste 的全屏 TUI，还未达到稳定日常使用
+- 对于 PowerShell / `cmd.exe` 下的基础命令行工作流，已经具备可正常使用能力
+- 对于依赖 alternate screen、鼠标报告、bracketed paste 的全屏 TUI，核心路径已接通
+- 当前剩余差距主要在真实 GUI 手工回归，而不是协议主链路缺失
 
 ### 当前验证基线
 
@@ -112,10 +113,12 @@ Terminal
 - 滚动区域（DECSTBM）
 - 宽字符标记
 - 私有模式中的应用光标键模式与光标显隐
+- alternate screen
+- 鼠标跟踪模式
+- bracketed paste 状态
 - scrollback + viewport 选择一致性
 
 **仍未完成：**
-- alternate screen buffer
 - 更完整的 DEC 私有模式覆盖
 - 更完整的全屏 TUI 兼容逻辑
 
@@ -140,35 +143,34 @@ Terminal
 - winit 窗口与事件循环
 - 功能键、方向键、基础 Ctrl/Alt 组合键
 - 应用光标键模式输入编码
+- 应用小键盘模式输入编码
 - 鼠标拖拽选择
 - 双击选词、三击选行
 - 滚轮滚动 / Shift+PageUp/PageDown/Home/End
+- 鼠标报告模式
+- bracketed paste
 - Ctrl+Shift+C / Ctrl+Shift+V / 右键 / 中键 粘贴
+- IME 提交事件
 - DPI 变化响应
 - 配置文件加载
 
 **当前不足：**
-- 鼠标报告模式未接入
-- bracketed paste 未接入
-- IME / 中文输入法未接入
-- 应用小键盘模式的完整序列还未铺开
+- IME preedit 未渲染
+- 更深层鼠标模式 / 私有模式仍需持续打磨
 
 ---
 
-## 五、距离“可正常使用终端”还差什么
+## 五、当前剩余风险
 
-下面这些项决定项目是否能从“可试用”进入“可日常使用”：
+下面这些项决定项目何时能从“代码能力已经接通”升级为“可以放心对外宣称稳定可用”：
 
 ### 1. 全屏 TUI 兼容性
-- alternate screen buffer
-- 鼠标报告模式
-- bracketed paste
 - 更完整的 CSI / DEC 私有模式支持
+- `vim` / `less` / `fzf` / `git` 等真实工作流的 GUI 手工回归
 
 ### 2. 输入法与复杂输入
-- IME / 中文输入法
-- 更完整的修饰键组合兼容
-- 应用小键盘模式
+- IME preedit 预编辑显示
+- 更多修饰键组合与国际键盘布局回归
 
 ### 3. 字体与渲染质量
 - DirectWrite 字形光栅化主路径
@@ -220,12 +222,8 @@ Terminal
 
 ### Phase A — 达到“可正常使用终端”
 
-- alternate screen buffer
-- 鼠标报告模式
-- bracketed paste
-- IME / 中文输入
-- 更完整的 DEC / CSI 覆盖
-- shell 退出后的窗口行为
+- 已完成：alternate screen / 鼠标报告 / bracketed paste / IME 提交链路 / shell 退出提示
+- 待继续打磨：更完整的 DEC / CSI 覆盖、IME preedit、真实工作流回归
 
 ### Phase B — 字体链路深化
 
@@ -262,7 +260,7 @@ Terminal
 
 ## 八、结论
 
-项目现在已经处在“**可以试用，但还不能宣称是稳定可正常使用终端**”的阶段。
+项目现在已经处在“**P0 主链路能力已接通，但还需要发布前风险收敛**”的阶段。
 
 最关键的判断标准不是“能不能显示文字”，而是：
 
@@ -271,4 +269,4 @@ Terminal
 - 能否在 Windows 字体环境下稳定输出高质量文本
 - 能否通过真实 shell 工作流回归
 
-因此，后续优先级应明确放在 **Phase A：补齐可正常使用终端所需能力**，而不是立即去做更靠后的体验增强项。
+因此，后续优先级应明确放在 **Phase A 的剩余风险收敛项**，而不是立即去做更靠后的体验增强项。

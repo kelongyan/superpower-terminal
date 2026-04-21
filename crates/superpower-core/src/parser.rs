@@ -24,6 +24,20 @@ const ANSI_COLORS: [Color; 16] = [
     Color::new(0xFF, 0xFF, 0xFF), // 15 Bright White
 ];
 
+/// 鼠标跟踪模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTrackingMode {
+    /// 不上报鼠标事件
+    #[default]
+    Disabled,
+    /// 基础点击跟踪（X10/1000）
+    Normal,
+    /// 按钮拖拽跟踪（1002）
+    ButtonEvent,
+    /// 任意移动跟踪（1003）
+    AnyEvent,
+}
+
 /// 终端 — 组合 Grid + Cursor + 解析器
 pub struct Terminal {
     pub grid: Grid,
@@ -47,6 +61,20 @@ pub struct Terminal {
     private_modes: std::collections::HashSet<u16>,
     /// 应用光标键模式
     application_cursor_keys: bool,
+    /// 鼠标跟踪模式
+    mouse_tracking_mode: MouseTrackingMode,
+    /// 是否启用 SGR 扩展鼠标编码（1006）
+    mouse_sgr_mode: bool,
+    /// 是否启用 bracketed paste（2004）
+    bracketed_paste_mode: bool,
+    /// 是否处于 alternate screen
+    alternate_screen: bool,
+    /// alternate screen 对应的网格
+    alternate_grid: Grid,
+    /// alternate screen 对应的光标
+    alternate_cursor: Cursor,
+    /// alternate screen 对应的保存光标
+    alternate_saved_cursor: Cursor,
     /// 窗口标题
     pub title: String,
     /// 当前选区
@@ -138,6 +166,19 @@ impl Terminal {
             modes: std::collections::HashSet::new(),
             private_modes: std::collections::HashSet::new(),
             application_cursor_keys: false,
+            mouse_tracking_mode: MouseTrackingMode::Disabled,
+            mouse_sgr_mode: false,
+            bracketed_paste_mode: false,
+            alternate_screen: false,
+            alternate_grid: Grid::with_colors(
+                rows,
+                cols,
+                0,
+                default_foreground,
+                default_background,
+            ),
+            alternate_cursor: Cursor::new(),
+            alternate_saved_cursor: Cursor::new(),
             title: String::new(),
             selection: None,
         };
@@ -148,7 +189,9 @@ impl Terminal {
 
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
         self.grid.resize(new_rows, new_cols);
+        self.alternate_grid.resize(new_rows, new_cols);
         self.cursor.clamp(new_rows, new_cols);
+        self.alternate_cursor.clamp(new_rows, new_cols);
         self.damage.resize(new_rows);
     }
 
@@ -165,6 +208,63 @@ impl Terminal {
 
     fn mark_dirty(&mut self, row: usize) {
         self.damage.mark_row(row);
+    }
+
+    /// 保存光标位置
+    fn save_cursor(&mut self) {
+        self.saved_cursor = self.cursor.clone();
+    }
+
+    /// 恢复光标位置
+    fn restore_cursor(&mut self) {
+        self.cursor = self.saved_cursor.clone();
+        self.mark_dirty(self.cursor.row);
+    }
+
+    /// 创建一个新的空 alternate screen
+    fn fresh_alternate_grid(&self) -> Grid {
+        Grid::with_colors(
+            self.grid.rows(),
+            self.grid.cols(),
+            0,
+            self.default_foreground,
+            self.default_background,
+        )
+    }
+
+    /// 进入 alternate screen
+    fn enter_alternate_screen(&mut self) {
+        if self.alternate_screen {
+            return;
+        }
+
+        // 每次进入 alternate screen 都从空白状态开始，避免遗留上次的内容。
+        self.alternate_grid = self.fresh_alternate_grid();
+        self.alternate_cursor = Cursor::new();
+        self.alternate_saved_cursor = Cursor::new();
+
+        std::mem::swap(&mut self.grid, &mut self.alternate_grid);
+        std::mem::swap(&mut self.cursor, &mut self.alternate_cursor);
+        std::mem::swap(&mut self.saved_cursor, &mut self.alternate_saved_cursor);
+
+        self.alternate_screen = true;
+        self.selection = None;
+        self.damage.mark_full_redraw();
+    }
+
+    /// 离开 alternate screen，回到主屏
+    fn leave_alternate_screen(&mut self) {
+        if !self.alternate_screen {
+            return;
+        }
+
+        std::mem::swap(&mut self.grid, &mut self.alternate_grid);
+        std::mem::swap(&mut self.cursor, &mut self.alternate_cursor);
+        std::mem::swap(&mut self.saved_cursor, &mut self.alternate_saved_cursor);
+
+        self.alternate_screen = false;
+        self.selection = None;
+        self.damage.mark_full_redraw();
     }
 
     /// 设置标准模式
@@ -188,6 +288,25 @@ impl Terminal {
             25 => self.cursor.visible = true,
             // DECNKM - 应用小键盘模式
             66 => self.cursor.app_mode = true,
+            // Alternate screen（xterm 兼容）
+            47 | 1047 => self.enter_alternate_screen(),
+            // Save cursor
+            1048 => self.save_cursor(),
+            // Save cursor + alternate screen
+            1049 => {
+                self.save_cursor();
+                self.enter_alternate_screen();
+            }
+            // 鼠标点击跟踪
+            1000 => self.mouse_tracking_mode = MouseTrackingMode::Normal,
+            // 鼠标拖拽跟踪
+            1002 => self.mouse_tracking_mode = MouseTrackingMode::ButtonEvent,
+            // 鼠标任意移动跟踪
+            1003 => self.mouse_tracking_mode = MouseTrackingMode::AnyEvent,
+            // SGR 鼠标编码
+            1006 => self.mouse_sgr_mode = true,
+            // bracketed paste
+            2004 => self.bracketed_paste_mode = true,
             _ => {}
         }
     }
@@ -203,6 +322,21 @@ impl Terminal {
             25 => self.cursor.visible = false,
             // DECNKM - 普通小键盘模式
             66 => self.cursor.app_mode = false,
+            // Alternate screen
+            47 | 1047 => self.leave_alternate_screen(),
+            // Restore cursor
+            1048 => self.restore_cursor(),
+            // Leave alternate screen + restore cursor
+            1049 => {
+                self.leave_alternate_screen();
+                self.restore_cursor();
+            }
+            // 关闭鼠标跟踪
+            1000 | 1002 | 1003 => self.mouse_tracking_mode = MouseTrackingMode::Disabled,
+            // 关闭 SGR 鼠标编码
+            1006 => self.mouse_sgr_mode = false,
+            // 关闭 bracketed paste
+            2004 => self.bracketed_paste_mode = false,
             _ => {}
         }
     }
@@ -215,6 +349,26 @@ impl Terminal {
     /// 是否启用应用小键盘模式
     pub fn keypad_application_mode(&self) -> bool {
         self.cursor.app_mode
+    }
+
+    /// 当前鼠标跟踪模式
+    pub fn mouse_tracking_mode(&self) -> MouseTrackingMode {
+        self.mouse_tracking_mode
+    }
+
+    /// 是否启用 SGR 鼠标编码
+    pub fn mouse_sgr_mode(&self) -> bool {
+        self.mouse_sgr_mode
+    }
+
+    /// 是否启用 bracketed paste
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.bracketed_paste_mode
+    }
+
+    /// 是否处于 alternate screen
+    pub fn alternate_screen(&self) -> bool {
+        self.alternate_screen
     }
 
     fn newline(&mut self) {
@@ -569,12 +723,11 @@ impl vte::Perform for Terminal {
             }
             // Save Cursor Position (DECSC)
             's' => {
-                self.saved_cursor = self.cursor.clone();
+                self.save_cursor();
             }
             // Restore Cursor Position (DECRC)
             'u' => {
-                self.cursor = self.saved_cursor.clone();
-                self.mark_dirty(self.cursor.row);
+                self.restore_cursor();
             }
             // SGR - Select Graphic Rendition
             'm' => {
@@ -728,5 +881,44 @@ mod tests {
 
         handler.process(b"\x1b[?25h");
         assert!(handler.terminal.cursor.visible);
+    }
+
+    #[test]
+    fn test_alternate_screen_restores_primary_contents() {
+        let mut handler = TerminalHandler::new(4, 8, 100);
+        handler.process(b"main");
+
+        handler.process(b"\x1b[?1049h");
+        assert!(handler.terminal.alternate_screen());
+        let alt_cell = handler.terminal.grid.cell(0, 0).unwrap();
+        assert_eq!(alt_cell.character, ' ');
+
+        handler.process(b"alt");
+        handler.process(b"\x1b[?1049l");
+
+        assert!(!handler.terminal.alternate_screen());
+        let main_cell = handler.terminal.grid.cell(0, 0).unwrap();
+        assert_eq!(main_cell.character, 'm');
+    }
+
+    #[test]
+    fn test_mouse_and_bracketed_paste_private_modes() {
+        let mut handler = TerminalHandler::new(24, 80, 1000);
+
+        handler.process(b"\x1b[?1002h\x1b[?1006h\x1b[?2004h");
+        assert_eq!(
+            handler.terminal.mouse_tracking_mode(),
+            MouseTrackingMode::ButtonEvent
+        );
+        assert!(handler.terminal.mouse_sgr_mode());
+        assert!(handler.terminal.bracketed_paste_mode());
+
+        handler.process(b"\x1b[?1002l\x1b[?1006l\x1b[?2004l");
+        assert_eq!(
+            handler.terminal.mouse_tracking_mode(),
+            MouseTrackingMode::Disabled
+        );
+        assert!(!handler.terminal.mouse_sgr_mode());
+        assert!(!handler.terminal.bracketed_paste_mode());
     }
 }

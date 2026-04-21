@@ -11,5 +11,5 @@ pub use cell::{Cell, CellFlags, Color};
 pub use cursor::{Cursor, CursorShape};
 pub use damage::DamageTracker;
 pub use grid::{Grid, Row};
-pub use parser::{Terminal, TerminalHandler};
+pub use parser::{MouseTrackingMode, Terminal, TerminalHandler};
 pub use selection::{cell_bounds, line_bounds, word_bounds, Selection, SelectionPos};

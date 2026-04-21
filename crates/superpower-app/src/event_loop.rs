@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use superpower_core::{
-    cell_bounds, line_bounds, word_bounds, Color, Selection, SelectionPos, TerminalHandler,
+    cell_bounds, line_bounds, word_bounds, Color, MouseTrackingMode, Selection, SelectionPos,
+    TerminalHandler,
 };
 use superpower_pty::{PtyEvent, PtySession};
 use superpower_renderer::{Renderer, RendererOptions};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
@@ -35,6 +36,14 @@ struct App {
     last_click_cell: Option<(usize, usize)>,
     /// 连续点击计数
     click_count: u8,
+    /// 鼠标报告时最后一次上报的单元格
+    last_reported_cell: Option<(usize, usize)>,
+    /// 当前按下的鼠标按钮，用于拖拽上报
+    pressed_mouse_button: Option<MouseButton>,
+    /// shell 是否已经退出
+    shell_exited: bool,
+    /// shell 最近一次退出码
+    shell_exit_code: Option<i32>,
     /// 单元格尺寸（从 renderer 缓存）
     cell_width: f32,
     cell_height: f32,
@@ -49,6 +58,16 @@ enum SelectionDragMode {
     Char,
     Word,
     Line,
+}
+
+/// 鼠标上报事件种类
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseReportKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    Motion(Option<MouseButton>),
+    WheelUp,
+    WheelDown,
 }
 
 impl App {
@@ -69,6 +88,10 @@ impl App {
             last_click_time: None,
             last_click_cell: None,
             click_count: 0,
+            last_reported_cell: None,
+            pressed_mouse_button: None,
+            shell_exited: false,
+            shell_exit_code: None,
             cell_width: 0.0,
             cell_height: 0.0,
             padding_x: 0.0,
@@ -130,6 +153,117 @@ impl App {
         })
     }
 
+    /// 当前是否应将鼠标事件交给终端程序，而不是本地选择逻辑
+    fn should_report_mouse(&self) -> bool {
+        self.terminal.as_ref().is_some_and(|terminal| {
+            terminal.terminal.mouse_tracking_mode() != MouseTrackingMode::Disabled
+        }) && !self.shift_pressed
+    }
+
+    /// 统一向 PTY 写入输入数据，并在写入前重置视口
+    fn write_input(&mut self, bytes: &[u8]) {
+        if self.shell_exited || bytes.is_empty() {
+            return;
+        }
+
+        if let Some(terminal) = &mut self.terminal {
+            terminal.terminal.grid.reset_display_offset();
+            terminal.terminal.damage.mark_full_redraw();
+        }
+
+        if let Some(pty) = &mut self.pty {
+            if let Err(err) = pty.write(bytes) {
+                tracing::warn!("Failed to write input to PTY: {}", err);
+            }
+        }
+    }
+
+    /// 处理 shell 退出后的状态与提示
+    fn handle_shell_exit(&mut self, code: i32) {
+        if self.shell_exited {
+            return;
+        }
+
+        self.shell_exited = true;
+        self.shell_exit_code = Some(code);
+        self.selecting = false;
+        self.selection_start_cell = None;
+        self.selection_anchor = None;
+        self.pressed_mouse_button = None;
+        self.last_reported_cell = None;
+
+        if let Some(window) = &self.window {
+            window.set_title(&format!("SuperPower Terminal - Shell exited ({})", code));
+        }
+
+        if let Some(terminal) = &mut self.terminal {
+            let message = format!("\r\n[SuperPower] shell exited with code {}\r\n", code);
+            terminal.process(message.as_bytes());
+            terminal.terminal.damage.mark_full_redraw();
+        }
+    }
+
+    /// 将当前终端光标同步给 IME，避免候选框位置漂移
+    fn update_ime_cursor_area(&self) {
+        let (Some(window), Some(terminal)) = (&self.window, &self.terminal) else {
+            return;
+        };
+
+        let x = self.padding_x + terminal.terminal.cursor.col as f32 * self.cell_width;
+        let y = self.padding_y + terminal.terminal.cursor.row as f32 * self.cell_height;
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x.round() as i32, y.round() as i32),
+            winit::dpi::PhysicalSize::new(
+                self.cell_width.ceil().max(1.0) as u32,
+                self.cell_height.ceil().max(1.0) as u32,
+            ),
+        );
+    }
+
+    /// 上报鼠标事件给终端程序
+    fn report_mouse(&mut self, kind: MouseReportKind, row: usize, col: usize) {
+        let Some((mode, sgr)) = self.terminal.as_ref().map(|terminal| {
+            (
+                terminal.terminal.mouse_tracking_mode(),
+                terminal.terminal.mouse_sgr_mode(),
+            )
+        }) else {
+            return;
+        };
+        let encoded = encode_mouse_report(
+            kind,
+            row,
+            col,
+            sgr,
+            self.shift_pressed,
+            self.alt_pressed,
+            self.ctrl_pressed,
+        );
+
+        if let Some(bytes) = encoded {
+            self.write_input(&bytes);
+        }
+
+        match kind {
+            MouseReportKind::Motion(_) => self.last_reported_cell = Some((row, col)),
+            MouseReportKind::Press(button) => {
+                self.pressed_mouse_button = Some(button);
+                self.last_reported_cell = Some((row, col));
+            }
+            MouseReportKind::Release(_) => {
+                self.pressed_mouse_button = None;
+                self.last_reported_cell = Some((row, col));
+            }
+            MouseReportKind::WheelUp | MouseReportKind::WheelDown => {
+                self.last_reported_cell = Some((row, col));
+            }
+        }
+
+        if mode == MouseTrackingMode::Disabled {
+            self.last_reported_cell = None;
+        }
+    }
+
     /// 复制选区文本到剪贴板
     fn copy_selection(&mut self) {
         let terminal = match &self.terminal {
@@ -171,14 +305,17 @@ impl App {
             return;
         }
 
-        if let Some(terminal) = &mut self.terminal {
-            terminal.terminal.grid.reset_display_offset();
-            terminal.terminal.damage.mark_full_redraw();
-        }
+        let payload = if let Some(terminal) = &self.terminal {
+            if terminal.terminal.bracketed_paste_mode() {
+                encode_bracketed_paste(&text)
+            } else {
+                text.into_bytes()
+            }
+        } else {
+            text.into_bytes()
+        };
 
-        if let Some(pty) = &mut self.pty {
-            let _ = pty.write(text.as_bytes());
-        }
+        self.write_input(&payload);
     }
 }
 
@@ -218,6 +355,7 @@ impl ApplicationHandler for App {
                 .create_window(attrs)
                 .expect("Failed to create window"),
         );
+        window.set_ime_allowed(true);
 
         let renderer = pollster::block_on(Renderer::new(
             Arc::clone(&window),
@@ -307,17 +445,23 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                let mut exit_code = None;
                 if let (Some(pty), Some(terminal)) = (&mut self.pty, &mut self.terminal) {
                     while let Ok(event) = pty.rx.try_recv() {
                         match event {
                             PtyEvent::Data(data) => {
                                 terminal.process(&data);
                             }
-                            PtyEvent::Exit(_code) => {
+                            PtyEvent::Exit(code) => {
                                 tracing::info!("Shell exited");
+                                exit_code = Some(code);
                             }
                         }
                     }
+                }
+
+                if let Some(code) = exit_code {
+                    self.handle_shell_exit(code);
                 }
 
                 if let (Some(renderer), Some(terminal)) = (&mut self.renderer, &mut self.terminal) {
@@ -338,6 +482,8 @@ impl ApplicationHandler for App {
                 if let Some(terminal) = &mut self.terminal {
                     terminal.terminal.damage.clear();
                 }
+
+                self.update_ime_cursor_area();
 
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -361,15 +507,17 @@ impl ApplicationHandler for App {
                 }
 
                 // 其他键盘输入
-                if let (Some(pty), Some(terminal)) = (&mut self.pty, &mut self.terminal) {
-                    handle_key_input(
+                if let Some(terminal) = &mut self.terminal {
+                    let payload = handle_key_input(
                         event,
-                        pty,
                         terminal,
                         self.shift_pressed,
                         self.ctrl_pressed,
                         self.alt_pressed,
                     );
+                    if let Some(bytes) = payload {
+                        self.write_input(&bytes);
+                    }
                 }
             }
 
@@ -379,8 +527,30 @@ impl ApplicationHandler for App {
                 self.alt_pressed = modifiers.state().alt_key();
             }
 
+            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                self.write_input(text.as_bytes());
+            }
+
             WindowEvent::MouseWheel { delta, .. } => {
-                if let Some(terminal) = &mut self.terminal {
+                if self.should_report_mouse() {
+                    if let Some((row, col)) = self.pointer_cell {
+                        let steps = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() as isize,
+                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                (pos.y / 20.0).round() as isize
+                            }
+                        };
+                        if steps > 0 {
+                            for _ in 0..steps {
+                                self.report_mouse(MouseReportKind::WheelUp, row, col);
+                            }
+                        } else if steps < 0 {
+                            for _ in 0..(-steps) {
+                                self.report_mouse(MouseReportKind::WheelDown, row, col);
+                            }
+                        }
+                    }
+                } else if let Some(terminal) = &mut self.terminal {
                     let lines = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => (-y * 3.0) as isize,
                         winit::event::MouseScrollDelta::PixelDelta(pos) => (-pos.y / 20.0) as isize,
@@ -399,6 +569,32 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.should_report_mouse() {
+                    if let Some((row, col)) = self.pointer_cell {
+                        match (button, state) {
+                            (
+                                MouseButton::Left | MouseButton::Middle | MouseButton::Right,
+                                ElementState::Pressed,
+                            ) => {
+                                self.report_mouse(MouseReportKind::Press(button), row, col);
+                            }
+                            (
+                                MouseButton::Left | MouseButton::Middle | MouseButton::Right,
+                                ElementState::Released,
+                            ) => {
+                                let release_button = self.pressed_mouse_button.unwrap_or(button);
+                                self.report_mouse(
+                                    MouseReportKind::Release(release_button),
+                                    row,
+                                    col,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
+
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
                         let Some((row, col)) = self.pointer_cell else {
@@ -466,6 +662,31 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_cell = self.pixel_to_cell(position.x, position.y);
+                if self.should_report_mouse() {
+                    let Some((row, col)) = self.pointer_cell else {
+                        return;
+                    };
+                    let Some(terminal) = &self.terminal else {
+                        return;
+                    };
+
+                    let mode = terminal.terminal.mouse_tracking_mode();
+                    let should_report_motion = match mode {
+                        MouseTrackingMode::Disabled | MouseTrackingMode::Normal => false,
+                        MouseTrackingMode::ButtonEvent => self.pressed_mouse_button.is_some(),
+                        MouseTrackingMode::AnyEvent => true,
+                    };
+
+                    if should_report_motion && self.last_reported_cell != Some((row, col)) {
+                        self.report_mouse(
+                            MouseReportKind::Motion(self.pressed_mouse_button),
+                            row,
+                            col,
+                        );
+                    }
+                    return;
+                }
+
                 if !self.selecting {
                     return;
                 }
@@ -509,16 +730,15 @@ impl ApplicationHandler for App {
 /// 处理键盘输入
 fn handle_key_input(
     event: winit::event::KeyEvent,
-    pty: &mut PtySession,
     terminal: &mut TerminalHandler,
     shift_pressed: bool,
     ctrl_pressed: bool,
     alt_pressed: bool,
-) {
+) -> Option<Vec<u8>> {
     use winit::keyboard::{KeyCode, PhysicalKey};
 
     let PhysicalKey::Code(keycode) = event.physical_key else {
-        return;
+        return None;
     };
 
     // Shift+PageUp/PageDown/Home/End 滚动
@@ -530,7 +750,7 @@ fn handle_key_input(
                     .grid
                     .scroll_display_up(terminal.terminal.grid.rows());
                 terminal.terminal.damage.mark_full_redraw();
-                return;
+                return None;
             }
             KeyCode::PageDown => {
                 terminal
@@ -538,18 +758,18 @@ fn handle_key_input(
                     .grid
                     .scroll_display_down(terminal.terminal.grid.rows());
                 terminal.terminal.damage.mark_full_redraw();
-                return;
+                return None;
             }
             KeyCode::Home => {
                 let max = terminal.terminal.grid.scrollback_len();
                 terminal.terminal.grid.scroll_display_up(max);
                 terminal.terminal.damage.mark_full_redraw();
-                return;
+                return None;
             }
             KeyCode::End => {
                 terminal.terminal.grid.reset_display_offset();
                 terminal.terminal.damage.mark_full_redraw();
-                return;
+                return None;
             }
             _ => {}
         }
@@ -592,12 +812,38 @@ fn handle_key_input(
         KeyCode::F10 => vec![0x1B, b'[', b'2', b'1', b'~'],
         KeyCode::F11 => vec![0x1B, b'[', b'2', b'3', b'~'],
         KeyCode::F12 => vec![0x1B, b'[', b'2', b'4', b'~'],
+        KeyCode::Numpad0 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'p'],
+        KeyCode::Numpad1 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'q'],
+        KeyCode::Numpad2 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'r'],
+        KeyCode::Numpad3 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b's'],
+        KeyCode::Numpad4 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b't'],
+        KeyCode::Numpad5 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'u'],
+        KeyCode::Numpad6 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'v'],
+        KeyCode::Numpad7 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'w'],
+        KeyCode::Numpad8 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'x'],
+        KeyCode::Numpad9 if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'y'],
+        KeyCode::NumpadAdd if terminal.terminal.keypad_application_mode() => vec![0x1B, b'O', b'k'],
+        KeyCode::NumpadSubtract if terminal.terminal.keypad_application_mode() => {
+            vec![0x1B, b'O', b'm']
+        }
+        KeyCode::NumpadMultiply if terminal.terminal.keypad_application_mode() => {
+            vec![0x1B, b'O', b'j']
+        }
+        KeyCode::NumpadDivide if terminal.terminal.keypad_application_mode() => {
+            vec![0x1B, b'O', b'o']
+        }
+        KeyCode::NumpadEnter if terminal.terminal.keypad_application_mode() => {
+            vec![0x1B, b'O', b'M']
+        }
+        KeyCode::NumpadDecimal if terminal.terminal.keypad_application_mode() => {
+            vec![0x1B, b'O', b'n']
+        }
         _ => {
             if let Some(bytes) = encode_text_input(&event, keycode, ctrl_pressed, alt_pressed) {
                 prefix_alt_for_special_keys = false;
                 bytes
             } else {
-                return;
+                return None;
             }
         }
     };
@@ -611,9 +857,7 @@ fn handle_key_input(
         bytes
     };
 
-    terminal.terminal.grid.reset_display_offset();
-    terminal.terminal.damage.mark_full_redraw();
-    let _ = pty.write(&bytes);
+    Some(bytes)
 }
 
 /// 将普通文本键、Ctrl 组合键和 Alt 组合键编码为终端输入序列
@@ -689,6 +933,81 @@ fn encode_text_input(
     Some(text.as_bytes().to_vec())
 }
 
+/// 将普通粘贴文本包装为 bracketed paste 协议
+fn encode_bracketed_paste(text: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(text.len() + 12);
+    payload.extend_from_slice(b"\x1b[200~");
+    payload.extend_from_slice(text.as_bytes());
+    payload.extend_from_slice(b"\x1b[201~");
+    payload
+}
+
+/// 将鼠标事件编码为终端协议
+fn encode_mouse_report(
+    kind: MouseReportKind,
+    row: usize,
+    col: usize,
+    sgr_mode: bool,
+    shift_pressed: bool,
+    alt_pressed: bool,
+    ctrl_pressed: bool,
+) -> Option<Vec<u8>> {
+    let modifiers = (if shift_pressed { 4 } else { 0 })
+        + (if alt_pressed { 8 } else { 0 })
+        + (if ctrl_pressed { 16 } else { 0 });
+    let base = match kind {
+        MouseReportKind::Press(button) => button_code(button)?,
+        MouseReportKind::Release(button) => button_code(button)?,
+        MouseReportKind::Motion(button) => {
+            let base_button = match button {
+                Some(button) => button_code(button)?,
+                None => 3,
+            };
+            base_button + 32
+        }
+        MouseReportKind::WheelUp => 64,
+        MouseReportKind::WheelDown => 65,
+    } + modifiers;
+
+    let x = col + 1;
+    let y = row + 1;
+
+    if sgr_mode {
+        let final_char = match kind {
+            MouseReportKind::Release(_) => 'm',
+            _ => 'M',
+        };
+        return Some(format!("\x1b[<{};{};{}{}", base, x, y, final_char).into_bytes());
+    }
+
+    // 传统 X10 编码坐标范围较小，超出时直接截断到可表示范围。
+    let encoded_x = (x.min(223) + 32) as u8;
+    let encoded_y = (y.min(223) + 32) as u8;
+    let encoded_button = match kind {
+        MouseReportKind::Release(_) => 3 + modifiers,
+        _ => base,
+    } + 32;
+
+    Some(vec![
+        0x1B,
+        b'[',
+        b'M',
+        encoded_button as u8,
+        encoded_x,
+        encoded_y,
+    ])
+}
+
+/// 将 winit 的鼠标按钮映射到终端鼠标协议按钮码
+fn button_code(button: MouseButton) -> Option<usize> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
 /// 主入口
 pub fn run() {
     let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");
@@ -696,4 +1015,49 @@ pub fn run() {
 
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 验证 bracketed paste 会正确包裹控制序列
+    #[test]
+    fn bracketed_paste_wraps_payload() {
+        let encoded = encode_bracketed_paste("hello");
+        assert_eq!(encoded, b"\x1b[200~hello\x1b[201~");
+    }
+
+    /// 验证 SGR 鼠标编码格式正确
+    #[test]
+    fn encode_sgr_mouse_press() {
+        let encoded = encode_mouse_report(
+            MouseReportKind::Press(MouseButton::Left),
+            4,
+            9,
+            true,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(encoded, b"\x1b[<0;10;5M");
+    }
+
+    /// 验证传统鼠标编码至少会产出完整 ESC 序列
+    #[test]
+    fn encode_legacy_mouse_release() {
+        let encoded = encode_mouse_report(
+            MouseReportKind::Release(MouseButton::Left),
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(encoded.len(), 6);
+        assert_eq!(&encoded[..3], b"\x1b[M");
+    }
 }
