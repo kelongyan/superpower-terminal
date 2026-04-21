@@ -37,9 +37,9 @@ struct GlyphInfo {
     width: u32,
     /// 字形高度
     height: u32,
-    /// 实际栅格左边距
+    /// 相对单元格左上角的绘制偏移 X
     bearing_x: i32,
-    /// 实际栅格上边距
+    /// 相对单元格左上角的绘制偏移 Y
     bearing_y: i32,
 }
 
@@ -92,6 +92,7 @@ pub struct Renderer {
     font_size: f32,
     font_family: String,
     font_backend: FontBackend,
+    dw_rasterizer: Option<DwRasterizer>,
     default_foreground: Color,
     default_background: Color,
     padding_x: u32,
@@ -384,6 +385,7 @@ impl Renderer {
             font_size: options.font_size,
             font_family: options.font_family,
             font_backend: dw_rasterizer.metrics().source,
+            dw_rasterizer: dw_rasterizer.is_initialized().then_some(dw_rasterizer),
             default_foreground: options.default_foreground,
             default_background: options.default_background,
             padding_x: options.padding_x,
@@ -452,6 +454,7 @@ impl Renderer {
                 self.cell_width = dw_rasterizer.cell_width();
                 self.cell_height = dw_rasterizer.cell_height();
                 self.font_backend = dw_rasterizer.metrics().source;
+                self.dw_rasterizer = Some(dw_rasterizer);
             } else if let Some(metrics) = self
                 .primary_font()
                 .horizontal_line_metrics(scaled_font_size)
@@ -460,6 +463,7 @@ impl Renderer {
                     self.primary_font().rasterize('M', scaled_font_size).0.width as f32;
                 self.cell_height = metrics.new_line_size;
                 self.font_backend = FontBackend::FontdueFallback;
+                self.dw_rasterizer = None;
             }
         }
         self.glyph_cache.clear();
@@ -635,17 +639,44 @@ impl Renderer {
             return;
         }
 
-        // 从 fallback 链中选择可覆盖该字符的字体进行光栅化
-        let selected_font = &self.fonts[key.font_index].font;
-        let (metrics, bitmap) = selected_font.rasterize(character, font_size);
+        let directwrite_glyph = self
+            .dw_rasterizer
+            .as_ref()
+            .filter(|dw| key.font_index == 0 && dw.has_glyph(character))
+            .and_then(|dw| dw.rasterize(character));
+
+        let (width, height, offset_x, offset_y, bitmap) = if let Some(glyph) = directwrite_glyph {
+            (
+                glyph.width,
+                glyph.height,
+                glyph.offset_x,
+                glyph.offset_y,
+                glyph.bitmap,
+            )
+        } else {
+            // DirectWrite 无法覆盖时，退回现有 fontdue fallback 链。
+            let selected_font = &self.fonts[key.font_index].font;
+            let (metrics, bitmap) = selected_font.rasterize(character, font_size);
+            (
+                metrics.width as u32,
+                metrics.height as u32,
+                metrics.xmin,
+                ((self.cell_height - metrics.height as f32) - metrics.ymin as f32).round() as i32,
+                bitmap,
+            )
+        };
+
+        if width == 0 || height == 0 || bitmap.is_empty() {
+            return;
+        }
 
         // 计算图集中的位置（简单的行扫描分配）
         let glyph_count = self.glyph_cache.len() as u32;
-        let glyphs_per_row = atlas_size / (metrics.width as u32 + 1).max(1);
-        let gx = (glyph_count % glyphs_per_row) * (metrics.width as u32 + 1);
-        let gy = (glyph_count / glyphs_per_row) * (metrics.height as u32 + 1);
+        let glyphs_per_row = atlas_size / (width + 1).max(1);
+        let gx = (glyph_count % glyphs_per_row) * (width + 1);
+        let gy = (glyph_count / glyphs_per_row) * (height + 1);
 
-        if gy + metrics.height as u32 >= atlas_size {
+        if gy + height >= atlas_size {
             return;
         }
 
@@ -659,12 +690,12 @@ impl Renderer {
             &bitmap,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(metrics.width as u32),
-                rows_per_image: Some(metrics.height as u32),
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
             },
             wgpu::Extent3d {
-                width: metrics.width as u32,
-                height: metrics.height as u32,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
@@ -674,10 +705,10 @@ impl Renderer {
             GlyphInfo {
                 x: gx,
                 y: gy,
-                width: metrics.width as u32,
-                height: metrics.height as u32,
-                bearing_x: metrics.xmin,
-                bearing_y: metrics.ymin,
+                width,
+                height,
+                bearing_x: offset_x,
+                bearing_y: offset_y,
             },
         );
     }
@@ -763,7 +794,7 @@ impl Renderer {
                 let x0 = padding_x + col_idx as f32 * cw;
                 let y0 = padding_y + row_idx as f32 * ch;
                 let draw_x0 = x0 + glyph.bearing_x as f32;
-                let draw_y0 = y0 + (ch - glyph.height as f32) - glyph.bearing_y as f32;
+                let draw_y0 = y0 + glyph.bearing_y as f32;
                 let draw_x1 = draw_x0 + glyph.width as f32;
                 let draw_y1 = draw_y0 + glyph.height as f32;
 
@@ -955,7 +986,7 @@ impl Renderer {
             let x0 = padding_x + visual_col as f32 * cw;
             let y0 = padding_y + row as f32 * ch;
             let draw_x0 = x0 + glyph.bearing_x as f32;
-            let draw_y0 = y0 + (ch - glyph.height as f32) - glyph.bearing_y as f32;
+            let draw_y0 = y0 + glyph.bearing_y as f32;
             let draw_x1 = draw_x0 + glyph.width as f32;
             let draw_y1 = draw_y0 + glyph.height as f32;
 

@@ -1,12 +1,22 @@
 //! DirectWrite 字体光栅化模块
 //!
-//! 使用 Windows DirectWrite API 进行高质量字体光栅化，
-//! 特别是 CJK 字体的复杂文本排版和亚像素渲染。
-//!
-//! 当前为框架实现，光栅化仍使用 fontdue 作为后备。
+//! 当前实现目标：
+//! 1. 使用 DirectWrite 加载主字体 face
+//! 2. 提供更可靠的 cell metrics
+//! 3. 输出单字形灰度位图，供现有 atlas 结构复用
+//! 4. 无法覆盖时退回 fontdue fallback 链
 
+use std::mem::ManuallyDrop;
+
+use windows::core::{Interface, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{BOOL, RECT};
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_TEXTURE_ALIASED_1x1, DWriteCreateFactory, IDWriteFactory, IDWriteFont,
+    IDWriteFontCollection, IDWriteFontFace, IDWriteFontFamily, IDWriteGlyphRunAnalysis,
+    IDWriteRenderingParams, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_METRICS,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_GLYPH_METRICS, DWRITE_GLYPH_RUN, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_RENDERING_MODE_NATURAL,
 };
 
 #[derive(Debug, Clone)]
@@ -14,7 +24,19 @@ pub struct FontMetrics {
     pub font_size: f32,
     pub cell_width: f32,
     pub cell_height: f32,
+    pub baseline: f32,
+    pub design_units_per_em: u16,
     pub source: FontBackend,
+}
+
+#[derive(Debug, Clone)]
+pub struct DwGlyphBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub advance_width: f32,
+    pub bitmap: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +47,9 @@ pub enum FontBackend {
 
 /// DirectWrite 字体光栅化器
 pub struct DwRasterizer {
+    factory: Option<IDWriteFactory>,
+    font_face: Option<IDWriteFontFace>,
+    rendering_params: Option<IDWriteRenderingParams>,
     metrics: FontMetrics,
     initialized: bool,
 }
@@ -32,45 +57,63 @@ pub struct DwRasterizer {
 impl DwRasterizer {
     /// 创建新的 DirectWrite 光栅化器
     pub fn new(font_family: &str, font_size: f32) -> Result<Self, String> {
-        // 尝试初始化 DirectWrite
-        let initialized = Self::try_init_dwrite(font_family, font_size);
+        match unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) } {
+            Ok(factory) => match unsafe { resolve_font_face(&factory, font_family) } {
+                Ok(font_face) => {
+                    let rendering_params = unsafe { factory.CreateRenderingParams().ok() };
+                    let metrics = unsafe {
+                        compute_font_metrics(&font_face, rendering_params.as_ref(), font_size)?
+                    };
 
-        // 计算单元格大小
-        let metrics = if initialized {
-            FontMetrics {
-                font_size,
-                cell_width: font_size * 0.6,
-                cell_height: font_size * 1.35,
-                source: FontBackend::DirectWrite,
+                    tracing::info!(
+                        "DirectWrite initialized with font '{}' size {}",
+                        font_family,
+                        font_size
+                    );
+
+                    Ok(Self {
+                        factory: Some(factory),
+                        font_face: Some(font_face),
+                        rendering_params,
+                        metrics,
+                        initialized: true,
+                    })
+                }
+                Err(err) => {
+                    tracing::info!(
+                        "DirectWrite font '{}' unavailable ({}), using fontdue fallback",
+                        font_family,
+                        err
+                    );
+                    Ok(Self::fallback(font_size))
+                }
+            },
+            Err(err) => {
+                tracing::info!(
+                    "DirectWrite factory unavailable ({:?}), using fontdue fallback",
+                    err
+                );
+                Ok(Self::fallback(font_size))
             }
-        } else {
-            FontMetrics {
+        }
+    }
+
+    /// 创建 fallback 状态的 rasterizer
+    fn fallback(font_size: f32) -> Self {
+        Self {
+            factory: None,
+            font_face: None,
+            rendering_params: None,
+            metrics: FontMetrics {
                 font_size,
                 cell_width: font_size * 0.6,
                 cell_height: font_size * 1.2,
+                baseline: font_size,
+                design_units_per_em: 1,
                 source: FontBackend::FontdueFallback,
-            }
-        };
-
-        if initialized {
-            tracing::info!(
-                "DirectWrite initialized with font '{}' size {}",
-                font_family,
-                font_size
-            );
-        } else {
-            tracing::info!("DirectWrite unavailable, using fontdue fallback");
+            },
+            initialized: false,
         }
-
-        Ok(Self {
-            metrics,
-            initialized,
-        })
-    }
-
-    /// 尝试初始化 DirectWrite 工厂
-    fn try_init_dwrite(_font_family: &str, _font_size: f32) -> bool {
-        unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED).is_ok() }
     }
 
     pub fn metrics(&self) -> &FontMetrics {
@@ -96,4 +139,244 @@ impl DwRasterizer {
     pub fn is_initialized(&self) -> bool {
         self.initialized
     }
+
+    /// 检查字符是否可由 DirectWrite 主字体覆盖
+    pub fn has_glyph(&self, character: char) -> bool {
+        self.lookup_glyph_index(character)
+            .is_some_and(|glyph| glyph != 0)
+    }
+
+    /// 对单字形进行 DirectWrite 光栅化
+    pub fn rasterize(&self, character: char) -> Option<DwGlyphBitmap> {
+        let factory = self.factory.as_ref()?;
+        let font_face = self.font_face.as_ref()?;
+        let glyph_index = self.lookup_glyph_index(character)?;
+        if glyph_index == 0 {
+            return None;
+        }
+
+        let advance_width =
+            unsafe { glyph_advance_width(font_face, self.metrics.font_size, glyph_index) }.ok()?;
+
+        let glyph_indices = [glyph_index];
+        let glyph_advances = [advance_width];
+        let glyph_run = DWRITE_GLYPH_RUN {
+            fontFace: borrow_font_face(font_face),
+            fontEmSize: self.metrics.font_size,
+            glyphCount: 1,
+            glyphIndices: glyph_indices.as_ptr(),
+            glyphAdvances: glyph_advances.as_ptr(),
+            glyphOffsets: std::ptr::null(),
+            isSideways: BOOL(0),
+            bidiLevel: 0,
+        };
+
+        let rendering_mode = unsafe {
+            font_face
+                .GetRecommendedRenderingMode(
+                    self.metrics.font_size,
+                    1.0,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                    self.rendering_params.as_ref()?,
+                )
+                .unwrap_or(DWRITE_RENDERING_MODE_NATURAL)
+        };
+
+        let analysis: IDWriteGlyphRunAnalysis = unsafe {
+            factory
+                .CreateGlyphRunAnalysis(
+                    &glyph_run,
+                    1.0,
+                    None,
+                    rendering_mode,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                    0.0,
+                    self.metrics.baseline,
+                )
+                .ok()?
+        };
+
+        let bounds = unsafe {
+            analysis
+                .GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1)
+                .ok()?
+        };
+        if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+            return Some(DwGlyphBitmap {
+                width: 0,
+                height: 0,
+                offset_x: 0,
+                offset_y: 0,
+                advance_width,
+                bitmap: Vec::new(),
+            });
+        }
+
+        let width = (bounds.right - bounds.left) as u32;
+        let height = (bounds.bottom - bounds.top) as u32;
+        let mut bitmap = vec![0u8; (width * height) as usize];
+        unsafe {
+            analysis
+                .CreateAlphaTexture(
+                    DWRITE_TEXTURE_ALIASED_1x1,
+                    &bounds as *const RECT,
+                    &mut bitmap,
+                )
+                .ok()?;
+        }
+
+        Some(DwGlyphBitmap {
+            width,
+            height,
+            offset_x: bounds.left,
+            offset_y: bounds.top,
+            advance_width,
+            bitmap,
+        })
+    }
+
+    /// 查询字符对应的 glyph index
+    fn lookup_glyph_index(&self, character: char) -> Option<u16> {
+        let font_face = self.font_face.as_ref()?;
+        let codepoints = [character as u32];
+        let mut glyph_indices = [0u16; 1];
+        unsafe {
+            font_face
+                .GetGlyphIndices(codepoints.as_ptr(), 1, glyph_indices.as_mut_ptr())
+                .ok()?;
+        }
+        Some(glyph_indices[0])
+    }
+}
+
+/// 通过 family 名解析系统字体 face
+unsafe fn resolve_font_face(
+    factory: &IDWriteFactory,
+    family_name: &str,
+) -> Result<IDWriteFontFace, String> {
+    let mut collection = None::<IDWriteFontCollection>;
+    factory
+        .GetSystemFontCollection(&mut collection as *mut _, false)
+        .map_err(|err| format!("GetSystemFontCollection failed: {:?}", err))?;
+    let collection =
+        collection.ok_or_else(|| "System font collection not available".to_string())?;
+
+    let family = HSTRING::from(family_name);
+    let family_name = PCWSTR::from_raw(family.as_ptr());
+    let mut index = 0u32;
+    let mut exists = BOOL(0);
+    collection
+        .FindFamilyName(family_name, &mut index, &mut exists)
+        .map_err(|err| format!("FindFamilyName failed: {:?}", err))?;
+    if !exists.as_bool() {
+        return Err(format!(
+            "Font family '{}' not found",
+            family_name.to_string().unwrap_or_default()
+        ));
+    }
+
+    let family: IDWriteFontFamily = collection
+        .GetFontFamily(index)
+        .map_err(|err| format!("GetFontFamily failed: {:?}", err))?;
+    let font: IDWriteFont = family
+        .GetFirstMatchingFont(
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )
+        .map_err(|err| format!("GetFirstMatchingFont failed: {:?}", err))?;
+    font.CreateFontFace()
+        .map_err(|err| format!("CreateFontFace failed: {:?}", err))
+}
+
+/// 计算基础字体 metrics
+unsafe fn compute_font_metrics(
+    font_face: &IDWriteFontFace,
+    rendering_params: Option<&IDWriteRenderingParams>,
+    font_size: f32,
+) -> Result<FontMetrics, String> {
+    let mut metrics = DWRITE_FONT_METRICS::default();
+    font_face.GetMetrics(&mut metrics);
+    let design_units_per_em = metrics.designUnitsPerEm.max(1);
+    let scale = font_size / design_units_per_em as f32;
+
+    let ascent = metrics.ascent as f32 * scale;
+    let descent = metrics.descent as f32 * scale;
+    let line_gap = metrics.lineGap as f32 * scale;
+    let baseline = ascent.ceil().max(1.0);
+    let cell_height = (ascent + descent + line_gap).ceil().max(font_size.ceil());
+
+    let m_glyph = glyph_index_for(font_face, 'M').unwrap_or(0);
+    let cell_width = if m_glyph != 0 {
+        glyph_advance_width(font_face, font_size, m_glyph)
+            .unwrap_or(font_size * 0.6)
+            .ceil()
+            .max(1.0)
+    } else if let Some(rendering_params) = rendering_params {
+        font_face
+            .GetRecommendedRenderingMode(
+                font_size,
+                1.0,
+                DWRITE_MEASURING_MODE_NATURAL,
+                rendering_params,
+            )
+            .ok()
+            .map(|_| (font_size * 0.6).ceil())
+            .unwrap_or((font_size * 0.6).ceil())
+    } else {
+        (font_size * 0.6).ceil()
+    };
+
+    Ok(FontMetrics {
+        font_size,
+        cell_width,
+        cell_height,
+        baseline,
+        design_units_per_em,
+        source: FontBackend::DirectWrite,
+    })
+}
+
+/// 查询单字符 glyph index
+unsafe fn glyph_index_for(font_face: &IDWriteFontFace, character: char) -> Result<u16, String> {
+    let codepoints = [character as u32];
+    let mut glyph_indices = [0u16; 1];
+    font_face
+        .GetGlyphIndices(codepoints.as_ptr(), 1, glyph_indices.as_mut_ptr())
+        .map_err(|err| format!("GetGlyphIndices failed: {:?}", err))?;
+    Ok(glyph_indices[0])
+}
+
+/// 查询单字符 advance width（像素）
+unsafe fn glyph_advance_width(
+    font_face: &IDWriteFontFace,
+    font_size: f32,
+    glyph_index: u16,
+) -> Result<f32, String> {
+    let glyph_indices = [glyph_index];
+    let mut glyph_metrics = [DWRITE_GLYPH_METRICS::default(); 1];
+    font_face
+        .GetGdiCompatibleGlyphMetrics(
+            font_size,
+            1.0,
+            None,
+            false,
+            glyph_indices.as_ptr(),
+            1,
+            glyph_metrics.as_mut_ptr(),
+            false,
+        )
+        .map_err(|err| format!("GetGdiCompatibleGlyphMetrics failed: {:?}", err))?;
+
+    let mut font_metrics = DWRITE_FONT_METRICS::default();
+    font_face.GetMetrics(&mut font_metrics);
+    let design_units_per_em = font_metrics.designUnitsPerEm.max(1) as f32;
+    Ok(glyph_metrics[0].advanceWidth as f32 * (font_size / design_units_per_em))
+}
+
+/// 以“借用而非拥有”的方式把 font face 放进 glyph run 结构里
+fn borrow_font_face(font_face: &IDWriteFontFace) -> ManuallyDrop<Option<IDWriteFontFace>> {
+    let raw = Interface::as_raw(font_face);
+    let borrowed: Option<IDWriteFontFace> = unsafe { std::mem::transmute(raw) };
+    ManuallyDrop::new(borrowed)
 }

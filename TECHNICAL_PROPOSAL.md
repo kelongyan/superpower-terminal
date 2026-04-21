@@ -13,7 +13,7 @@
 |------|----------|----------|
 | **终端解析** | vte-rs | 已完成基础解析，支持部分 CSI/OSC/DEC 私有模式 |
 | **PTY** | portable-pty (ConPTY) | 已完成，支持 shell 启动 / resize / 退出检测 |
-| **渲染** | wgpu + fontdue atlas + DirectWrite 度量 | 已完成基础渲染管线 |
+| **渲染** | wgpu + fontdue atlas + DirectWrite 光栅化/度量 | 已完成基础渲染管线 |
 | **字体发现** | ttf-parser + Windows Fonts 扫描 | 已完成真实系统字体发现与 fallback 链 |
 | **窗口** | winit | 已完成事件循环 |
 | **配置** | toml + serde | 已完成配置解析与基础联动 |
@@ -47,8 +47,8 @@
 │  └── Glyph Atlas：2048x2048 R8Unorm                         │
 ├────────────────────────────────────────────────────────────┤
 │  字体链路                                                   │
-│  ├── fontdue：当前真实字形光栅化主路径                      │
-│  ├── DirectWrite：工厂探测 + 度量                            │
+│  ├── fontdue：fallback 字形光栅化路径                        │
+│  ├── DirectWrite：主字体单字形光栅化 + 度量                  │
 │  ├── ttf-parser：系统字体 family 发现                        │
 │  └── fallback chain：配置字体 → 常见 Windows 字体 → 内嵌字体 │
 ├────────────────────────────────────────────────────────────┤
@@ -133,7 +133,7 @@ Terminal
 - `font.family` → 系统字体发现 → fallback 链
 
 **当前不足：**
-- 实际 rasterize 主路径仍然是 `fontdue`
+- DirectWrite 目前主要覆盖主字体单字形，尚未完全接管 fallback 链
 - atlas 仍是简单行扫描放置策略
 - Emoji / 彩色字形 / ligatures 还未开始
 
@@ -229,7 +229,7 @@ Terminal
 
 ### Phase B — 字体链路深化
 
-- DirectWrite 字形光栅化
+- 扩大 DirectWrite 字形光栅化覆盖范围
 - CJK 渲染质量提升
 - 更强的字体 fallback
 - Emoji / 彩色字形前置准备
@@ -254,7 +254,7 @@ Terminal
 | GPU 渲染 | wgpu | 高性能 |
 | 当前字形光栅化 | fontdue | 先保证稳定增量 |
 | 字体发现 | ttf-parser + 系统字体扫描 | 先打通真实字体 family |
-| DirectWrite 当前职责 | 工厂探测 + 度量 | 为后续 rasterize 替换铺路 |
+| DirectWrite 当前职责 | 主字体单字形光栅化 + 度量 | 渐进替换 fontdue 主路径 |
 | 窗口管理 | winit | Rust 生态标准 |
 | 配置格式 | TOML | 简洁易读 |
 
