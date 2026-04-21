@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/superpower-core",
+    "crates/superpower-renderer",
+    "crates/superpower-pty",
+    "crates/superpower-app",
+]
+
+[workspace.dependencies]
+# 终端解析
+vte = "0.13"
+
+# PTY
+portable-pty = "0.8"
+
+# GPU 渲染
+wgpu = "24"
+
+# 窗口
+winit = "0.30"
+
+# 字体光栅化 (Phase 1 临时方案)
+fontdue = "0.9"
+
+# Windows API
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Direct3D11",
+] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# 异步
+tokio = { version = "1", features = ["full"] }
+
+# 并发
+crossbeam-channel = "0.5"
+
+# 剪贴板
+arboard = "3"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# bytemuck 用于 GPU 数据对齐
+bytemuck = { version = "1", features = ["derive"] }
