@@ -48,7 +48,95 @@ struct GlyphInfo {
 struct RenderLayout {
     screen_size: [f32; 2],
     cell_size: [f32; 2],
+    origin: [f32; 2],
     padding: [f32; 2],
+}
+
+/// 通用矩形区域，供应用层布局和命中测试复用
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    /// 创建新的矩形区域
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// 返回矩形右边界
+    pub fn right(&self) -> f32 {
+        self.x + self.width
+    }
+
+    /// 返回矩形下边界
+    pub fn bottom(&self) -> f32 {
+        self.y + self.height
+    }
+
+    /// 判断指定点是否命中当前矩形
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.x as f64
+            && px <= self.right() as f64
+            && py >= self.y as f64
+            && py <= self.bottom() as f64
+    }
+
+    /// 缩小一个矩形，用于计算内边距后的内容区
+    pub fn inset(&self, dx: f32, dy: f32) -> Self {
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+            width: (self.width - dx * 2.0).max(0.0),
+            height: (self.height - dy * 2.0).max(0.0),
+        }
+    }
+}
+
+impl Default for Rect {
+    fn default() -> Self {
+        Self::new(0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+/// 文本在区域中的对齐方式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// 一个纯色矩形绘制项
+#[derive(Debug, Clone)]
+pub struct UiQuad {
+    pub rect: Rect,
+    pub color: Color,
+}
+
+/// 一段应用层文本绘制项
+#[derive(Debug, Clone)]
+pub struct UiText {
+    pub rect: Rect,
+    pub text: String,
+    pub color: Color,
+    pub align: TextAlign,
+}
+
+/// 一帧应用层 UI 场景
+#[derive(Debug, Clone)]
+pub struct ChromeScene {
+    pub clear_color: Color,
+    pub quads: Vec<UiQuad>,
+    pub texts: Vec<UiText>,
 }
 
 /// 已加载的单个字体面
@@ -107,6 +195,7 @@ pub struct Renderer {
     // 终端尺寸
     cell_width: f32,
     cell_height: f32,
+    terminal_viewport: Rect,
     // 屏幕尺寸
     width: u32,
     height: u32,
@@ -407,6 +496,7 @@ impl Renderer {
             padding_y: options.padding_y,
             cell_width,
             cell_height,
+            terminal_viewport: Rect::new(0.0, 0.0, size.width as f32, size.height as f32),
             width: size.width,
             height: size.height,
             scale_factor,
@@ -419,6 +509,16 @@ impl Renderer {
             self.config.height = new_size.height;
             self.width = new_size.width;
             self.height = new_size.height;
+            self.terminal_viewport.width = self
+                .terminal_viewport
+                .width
+                .min(new_size.width as f32)
+                .max(1.0);
+            self.terminal_viewport.height = self
+                .terminal_viewport
+                .height
+                .min(new_size.height as f32)
+                .max(1.0);
             self.surface.configure(&self.device, &self.config);
         }
     }
@@ -440,12 +540,44 @@ impl Renderer {
 
     /// 获取可用于终端排版的物理宽度
     fn content_width(&self) -> f32 {
-        (self.width as f32 - self.effective_padding_x() * 2.0).max(self.cell_width)
+        (self.terminal_viewport.width - self.effective_padding_x() * 2.0).max(self.cell_width)
     }
 
     /// 获取可用于终端排版的物理高度
     fn content_height(&self) -> f32 {
-        (self.height as f32 - self.effective_padding_y() * 2.0).max(self.cell_height)
+        (self.terminal_viewport.height - self.effective_padding_y() * 2.0).max(self.cell_height)
+    }
+
+    /// 设置终端视口区域，后续行列计算与终端绘制都基于该区域
+    pub fn set_terminal_viewport(&mut self, viewport: Rect) {
+        self.terminal_viewport = Rect::new(
+            viewport.x.clamp(0.0, self.width as f32),
+            viewport.y.clamp(0.0, self.height as f32),
+            viewport.width.max(1.0).min(self.width as f32),
+            viewport.height.max(1.0).min(self.height as f32),
+        );
+    }
+
+    /// 获取当前终端视口
+    pub fn terminal_viewport(&self) -> Rect {
+        self.terminal_viewport
+    }
+
+    /// 更新终端默认前景色与背景色
+    pub fn set_terminal_palette(&mut self, foreground: Color, background: Color) {
+        self.default_foreground = foreground;
+        self.default_background = background;
+    }
+
+    /// 更新字号并重算字体度量
+    pub fn set_font_size(&mut self, font_size: f32) {
+        self.font_size = font_size.max(9.0);
+        self.update_font_metrics(self.scale_factor);
+    }
+
+    /// 获取当前字号
+    pub fn font_size(&self) -> f32 {
+        self.font_size
     }
 
     /// 获取主字体，用于基础度量和无 fallback 的默认路径
@@ -566,8 +698,12 @@ impl Renderer {
         self.effective_padding_y()
     }
 
-    /// 渲染一帧
-    pub fn render(&mut self, handler: &TerminalHandler) -> Result<(), wgpu::SurfaceError> {
+    /// 渲染一帧，包括应用层 UI 与终端内容
+    pub fn render(
+        &mut self,
+        handler: &TerminalHandler,
+        chrome: &ChromeScene,
+    ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -583,9 +719,12 @@ impl Renderer {
         let dirty_rows = handler.terminal.damage.dirty_rows();
         // 光栅化脏行中的新字形，脏行索引基于当前视口而不是底层可见区
         self.rasterize_dirty_glyphs(&handler.terminal, &dirty_rows);
+        // UI 文本不走终端 damage，因此需要额外确保缓存存在
+        self.rasterize_ui_glyphs(chrome);
 
         // 构建背景与光标顶点数据
-        let mut bg_vertices = self.build_bg_vertices(&handler.terminal);
+        let mut bg_vertices = self.build_ui_bg_vertices(chrome);
+        bg_vertices.extend_from_slice(self.build_bg_vertices(&handler.terminal).as_slice());
         let cursor_vertices = self.build_cursor_vertices(&handler.terminal);
         let bg_vertex_count = bg_vertices.len() as u32;
         let cursor_vertex_count = cursor_vertices.len() as u32;
@@ -597,7 +736,8 @@ impl Renderer {
         );
 
         // 构建前景顶点数据
-        let fg_vertices = self.build_fg_vertices(&handler.terminal);
+        let mut fg_vertices = self.build_fg_vertices(&handler.terminal);
+        self.append_ui_text_vertices(&mut fg_vertices, chrome);
         let fg_vertex_count = fg_vertices.len() as u32;
         self.queue.write_buffer(
             &self.fg_vertex_buffer,
@@ -614,9 +754,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.default_background.r as f64 / 255.0,
-                            g: self.default_background.g as f64 / 255.0,
-                            b: self.default_background.b as f64 / 255.0,
+                            r: chrome.clear_color.r as f64 / 255.0,
+                            g: chrome.clear_color.g as f64 / 255.0,
+                            b: chrome.clear_color.b as f64 / 255.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -684,6 +824,157 @@ impl Renderer {
             for ch in preedit.text.chars().filter(|ch| *ch != ' ') {
                 self.ensure_glyph_cached(ch, false, false, font_size);
             }
+        }
+    }
+
+    /// 预热应用层文本对应的字形，避免首次点击面板时出现丢字
+    fn rasterize_ui_glyphs(&mut self, chrome: &ChromeScene) {
+        let font_size = self.scaled_font_size();
+
+        for text in &chrome.texts {
+            for ch in text.text.chars().filter(|ch| *ch != ' ' && *ch != '\0') {
+                self.ensure_glyph_cached(ch, false, false, font_size);
+            }
+        }
+    }
+
+    /// 构建应用层背景矩形顶点
+    fn build_ui_bg_vertices(&self, chrome: &ChromeScene) -> Vec<BgVertex> {
+        let mut vertices = Vec::new();
+        let screen_size = [self.width as f32, self.height as f32];
+
+        for quad in &chrome.quads {
+            append_bg_quad(
+                &mut vertices,
+                quad.color,
+                [
+                    quad.rect.x,
+                    quad.rect.y,
+                    quad.rect.right(),
+                    quad.rect.bottom(),
+                ],
+                screen_size,
+            );
+        }
+
+        vertices
+    }
+
+    /// 追加应用层文本顶点
+    fn append_ui_text_vertices(&self, vertices: &mut Vec<FgVertex>, chrome: &ChromeScene) {
+        let screen_size = [self.width as f32, self.height as f32];
+
+        for text in &chrome.texts {
+            let text_width = self.measure_text_width(text.text.as_str());
+            let start_x = match text.align {
+                TextAlign::Left => text.rect.x + self.cell_width * 0.5,
+                TextAlign::Center => text.rect.x + (text.rect.width - text_width).max(0.0) * 0.5,
+                TextAlign::Right => text.rect.right() - text_width - self.cell_width * 0.5,
+            };
+            let start_y = text.rect.y + (text.rect.height - self.cell_height).max(0.0) * 0.5;
+
+            self.append_plain_text_vertices(
+                vertices,
+                text.text.as_str(),
+                start_x,
+                start_y,
+                text.color,
+                screen_size,
+            );
+        }
+    }
+
+    /// 计算一段文本的近似像素宽度，当前按终端单元格宽度累计
+    fn measure_text_width(&self, text: &str) -> f32 {
+        text.chars()
+            .map(|ch| char_width(ch).max(1) as f32 * self.cell_width)
+            .sum()
+    }
+
+    /// 以自由像素坐标绘制一段文本，供窗口 chrome 复用终端字形缓存
+    fn append_plain_text_vertices(
+        &self,
+        vertices: &mut Vec<FgVertex>,
+        text: &str,
+        start_x: f32,
+        start_y: f32,
+        color: Color,
+        screen_size: [f32; 2],
+    ) {
+        let atlas_size = self.atlas_size as f32;
+        let [screen_width, screen_height] = screen_size;
+        let r = color.r as f32 / 255.0;
+        let g = color.g as f32 / 255.0;
+        let b = color.b as f32 / 255.0;
+        let mut cursor_x = start_x;
+
+        for ch in text.chars() {
+            let advance = char_width(ch).max(1) as f32 * self.cell_width;
+            if ch == ' ' {
+                cursor_x += advance;
+                continue;
+            }
+
+            let key = GlyphKey {
+                character: ch,
+                bold: false,
+                italic: false,
+                font_index: self.select_font_index(ch),
+            };
+            let Some(glyph) = self.glyph_cache.get(&key) else {
+                cursor_x += advance;
+                continue;
+            };
+
+            let draw_x0 = cursor_x + glyph.bearing_x as f32;
+            let draw_y0 = start_y + glyph.bearing_y as f32;
+            let draw_x1 = draw_x0 + glyph.width as f32;
+            let draw_y1 = draw_y0 + glyph.height as f32;
+
+            let nx0 = draw_x0 / screen_width * 2.0 - 1.0;
+            let ny0 = 1.0 - draw_y0 / screen_height * 2.0;
+            let nx1 = draw_x1 / screen_width * 2.0 - 1.0;
+            let ny1 = 1.0 - draw_y1 / screen_height * 2.0;
+
+            let u0 = glyph.x as f32 / atlas_size;
+            let v0 = glyph.y as f32 / atlas_size;
+            let u1 = (glyph.x + glyph.width) as f32 / atlas_size;
+            let v1 = (glyph.y + glyph.height) as f32 / atlas_size;
+
+            vertices.extend_from_slice(&[
+                FgVertex {
+                    position: [nx0, ny0],
+                    tex_coords: [u0, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny0],
+                    tex_coords: [u1, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx0, ny1],
+                    tex_coords: [u0, v1],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx0, ny1],
+                    tex_coords: [u0, v1],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny0],
+                    tex_coords: [u1, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny1],
+                    tex_coords: [u1, v1],
+                    color: [r, g, b],
+                },
+            ]);
+
+            cursor_x += advance;
         }
     }
 
@@ -785,6 +1076,7 @@ impl Renderer {
         let layout = RenderLayout {
             screen_size: [w, h],
             cell_size: [cw, ch],
+            origin: [self.terminal_viewport.x, self.terminal_viewport.y],
             padding: [padding_x, padding_y],
         };
 
@@ -804,8 +1096,8 @@ impl Renderer {
                     continue;
                 }
 
-                let x0 = padding_x + col_idx as f32 * cw;
-                let y0 = padding_y + row_idx as f32 * ch;
+                let x0 = self.terminal_viewport.x + padding_x + col_idx as f32 * cw;
+                let y0 = self.terminal_viewport.y + padding_y + row_idx as f32 * ch;
                 let x1 = x0 + cw;
                 let y1 = y0 + ch;
 
@@ -830,6 +1122,7 @@ impl Renderer {
         let layout = RenderLayout {
             screen_size: [w, h],
             cell_size: [cw, ch],
+            origin: [self.terminal_viewport.x, self.terminal_viewport.y],
             padding: [padding_x, padding_y],
         };
 
@@ -851,8 +1144,8 @@ impl Renderer {
                     None => continue,
                 };
 
-                let x0 = padding_x + col_idx as f32 * cw;
-                let y0 = padding_y + row_idx as f32 * ch;
+                let x0 = self.terminal_viewport.x + padding_x + col_idx as f32 * cw;
+                let y0 = self.terminal_viewport.y + padding_y + row_idx as f32 * ch;
                 let draw_x0 = x0 + glyph.bearing_x as f32;
                 let draw_y0 = y0 + glyph.bearing_y as f32;
                 let draw_x1 = draw_x0 + glyph.width as f32;
@@ -924,12 +1217,10 @@ impl Renderer {
         let h = self.height as f32;
         let cw = self.cell_width;
         let ch = self.cell_height;
-        let padding_x = self.effective_padding_x();
-        let padding_y = self.effective_padding_y();
         let row = terminal.cursor.row;
         let col = terminal.cursor.col;
-        let x0 = padding_x + col as f32 * cw;
-        let y0 = padding_y + row as f32 * ch;
+        let x0 = self.terminal_viewport.x + self.effective_padding_x() + col as f32 * cw;
+        let y0 = self.terminal_viewport.y + self.effective_padding_y() + row as f32 * ch;
 
         let (cursor_w, cursor_h, cursor_x0, cursor_y0) = match terminal.cursor.shape {
             CursorShape::Block => (cw, ch, x0, y0),
@@ -966,6 +1257,7 @@ impl Renderer {
 
         let [w, h] = layout.screen_size;
         let [cw, ch] = layout.cell_size;
+        let [origin_x, origin_y] = layout.origin;
         let [padding_x, padding_y] = layout.padding;
         let mut visual_col = terminal.cursor.col;
         let row = terminal.cursor.row;
@@ -979,9 +1271,9 @@ impl Renderer {
 
         for (char_index, ch_text) in preedit.text.chars().enumerate() {
             let width = char_width(ch_text).max(1);
-            let x0 = padding_x + visual_col as f32 * cw;
+            let x0 = origin_x + padding_x + visual_col as f32 * cw;
             let x1 = x0 + cw * width as f32;
-            let y0 = padding_y + row as f32 * ch;
+            let y0 = origin_y + padding_y + row as f32 * ch;
             let underline_y0 = y0 + ch - 2.0;
             let underline_y1 = y0 + ch;
             append_bg_quad(
@@ -1017,6 +1309,7 @@ impl Renderer {
 
         let [w, h] = layout.screen_size;
         let [cw, ch] = layout.cell_size;
+        let [origin_x, origin_y] = layout.origin;
         let [padding_x, padding_y] = layout.padding;
         let atlas_size = 2048.0f32;
         let mut visual_col = terminal.cursor.col;
@@ -1044,7 +1337,8 @@ impl Renderer {
             };
 
             let x0 = padding_x + visual_col as f32 * cw;
-            let y0 = padding_y + row as f32 * ch;
+            let y0 = origin_y + padding_y + row as f32 * ch;
+            let x0 = origin_x + x0;
             let draw_x0 = x0 + glyph.bearing_x as f32;
             let draw_y0 = y0 + glyph.bearing_y as f32;
             let draw_x1 = draw_x0 + glyph.width as f32;

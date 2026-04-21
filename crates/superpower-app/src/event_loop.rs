@@ -1,8 +1,10 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 use superpower_core::{
-    cell_bounds, char_width, line_bounds, word_bounds, Color, MouseTrackingMode, Selection,
-    SelectionPos, TerminalHandler,
+    cell_bounds, char_width, line_bounds, word_bounds, MouseTrackingMode, Selection, SelectionPos,
+    TerminalHandler,
 };
 use superpower_pty::{PtyEvent, PtySession};
 use superpower_renderer::{Renderer, RendererOptions};
@@ -11,15 +13,41 @@ use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
-/// 应用状态
-struct App {
-    window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
-    terminal: Option<TerminalHandler>,
-    pty: Option<PtySession>,
-    shift_pressed: bool,
-    ctrl_pressed: bool,
-    alt_pressed: bool,
+use crate::config::Config;
+use crate::ui::{
+    build_ui_model, AppTheme, StatusView, TabView, ThemePreset, UiAction, UiBuildState, UiModel,
+};
+
+/// 选择拖拽模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionDragMode {
+    Char,
+    Word,
+    Line,
+}
+
+/// 鼠标上报事件种类
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MouseReportKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    Motion(Option<MouseButton>),
+    WheelUp,
+    WheelDown,
+}
+
+/// 当前键盘焦点所在区域
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusArea {
+    Terminal,
+    Chrome,
+}
+
+/// 单个终端标签页状态
+struct TerminalTab {
+    title: String,
+    terminal: TerminalHandler,
+    pty: PtySession,
     /// 鼠标选择进行中
     selecting: bool,
     /// 选择起始位置（行列）
@@ -44,42 +72,35 @@ struct App {
     shell_exited: bool,
     /// shell 最近一次退出码
     shell_exit_code: Option<i32>,
-    /// 单元格尺寸（从 renderer 缓存）
-    cell_width: f32,
-    cell_height: f32,
-    /// 布局 padding（物理像素）
-    padding_x: f32,
-    padding_y: f32,
 }
 
-/// 选择拖拽模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectionDragMode {
-    Char,
-    Word,
-    Line,
-}
+impl TerminalTab {
+    /// 创建一个新的终端标签页
+    fn new(
+        title: String,
+        rows: usize,
+        cols: usize,
+        config: &Config,
+        theme: &AppTheme,
+    ) -> Result<Self, String> {
+        let terminal = TerminalHandler::with_theme(
+            rows,
+            cols,
+            config.scrollback.limit,
+            theme.terminal_foreground,
+            theme.terminal_background,
+        );
+        let pty = PtySession::new(
+            cols as u16,
+            rows as u16,
+            &config.shell.program,
+            &config.shell.args,
+        )?;
 
-/// 鼠标上报事件种类
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MouseReportKind {
-    Press(MouseButton),
-    Release(MouseButton),
-    Motion(Option<MouseButton>),
-    WheelUp,
-    WheelDown,
-}
-
-impl App {
-    fn new() -> Self {
-        Self {
-            window: None,
-            renderer: None,
-            terminal: None,
-            pty: None,
-            shift_pressed: false,
-            ctrl_pressed: false,
-            alt_pressed: false,
+        Ok(Self {
+            title,
+            terminal,
+            pty,
             selecting: false,
             selection_start_cell: None,
             selection_anchor: None,
@@ -92,6 +113,82 @@ impl App {
             pressed_mouse_button: None,
             shell_exited: false,
             shell_exit_code: None,
+        })
+    }
+
+    /// 返回用于 UI 展示的标题
+    fn view(&self, is_active: bool) -> TabView {
+        TabView {
+            title: self.title.clone(),
+            is_active,
+            is_exited: self.shell_exited,
+        }
+    }
+}
+
+/// 应用状态
+struct App {
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
+    config: Config,
+    theme: AppTheme,
+    tabs: Vec<TerminalTab>,
+    active_tab: usize,
+    settings_open: bool,
+    focus_area: FocusArea,
+    ui_model: UiModel,
+    ui_dirty: bool,
+    shift_pressed: bool,
+    ctrl_pressed: bool,
+    alt_pressed: bool,
+    /// 当前窗口内最后一次鼠标位置
+    last_cursor_position: Option<(f64, f64)>,
+    /// 单元格尺寸（从 renderer 缓存）
+    cell_width: f32,
+    cell_height: f32,
+    /// 布局 padding（物理像素）
+    padding_x: f32,
+    padding_y: f32,
+}
+
+impl App {
+    /// 创建应用实例，并预先加载配置
+    fn new() -> Self {
+        let config = crate::config::Config::load_from_file(&crate::config::Config::config_path());
+        let theme = AppTheme::from_preset(ThemePreset::GraphiteDark);
+        let ui_model = build_ui_model(&UiBuildState {
+            window_width: config.window.width as f32,
+            window_height: config.window.height as f32,
+            theme,
+            settings_open: false,
+            tabs: Vec::new(),
+            active_tab: 0,
+            font_size: config.font.size,
+            status: StatusView {
+                shell_label: shell_label(config.shell.program.as_str()),
+                terminal_cols: 0,
+                terminal_rows: 0,
+                is_scrolled: false,
+                theme_name: theme.name().to_string(),
+                exit_code: None,
+            },
+        });
+
+        Self {
+            window: None,
+            renderer: None,
+            config,
+            theme,
+            tabs: Vec::new(),
+            active_tab: 0,
+            settings_open: false,
+            focus_area: FocusArea::Terminal,
+            ui_model,
+            ui_dirty: true,
+            shift_pressed: false,
+            ctrl_pressed: false,
+            alt_pressed: false,
+            last_cursor_position: None,
             cell_width: 0.0,
             cell_height: 0.0,
             padding_x: 0.0,
@@ -99,41 +196,303 @@ impl App {
         }
     }
 
-    /// 将像素坐标转换为终端行列
+    /// 获取当前活动标签页
+    fn active_tab(&self) -> Option<&TerminalTab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    /// 获取当前活动标签页的可变引用
+    fn active_tab_mut(&mut self) -> Option<&mut TerminalTab> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
+    /// 同步 renderer 缓存出来的像素度量
+    fn update_cached_metrics(&mut self) {
+        if let Some(renderer) = &self.renderer {
+            self.cell_width = renderer.cell_width();
+            self.cell_height = renderer.cell_height();
+            self.padding_x = renderer.padding_x();
+            self.padding_y = renderer.padding_y();
+        }
+    }
+
+    /// 构建一份当前所有标签页的 UI 摘要
+    fn tab_views(&self) -> Vec<TabView> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| tab.view(index == self.active_tab))
+            .collect()
+    }
+
+    /// 构建当前状态栏信息
+    fn status_view(&self, rows: usize, cols: usize) -> StatusView {
+        let exit_code = self.active_tab().and_then(|tab| tab.shell_exit_code);
+        let is_scrolled = self
+            .active_tab()
+            .is_some_and(|tab| tab.terminal.terminal.grid.is_scrolled());
+
+        StatusView {
+            shell_label: shell_label(self.config.shell.program.as_str()),
+            terminal_cols: cols,
+            terminal_rows: rows,
+            is_scrolled,
+            theme_name: self.theme.name().to_string(),
+            exit_code,
+        }
+    }
+
+    /// 统一重建 UI 布局，并在必要时同步终端行列尺寸
+    fn refresh_ui_model(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let Some(font_size) = self.renderer.as_ref().map(|renderer| renderer.font_size()) else {
+            return;
+        };
+
+        let size = window.inner_size();
+        let current_rows = self
+            .active_tab()
+            .map(|tab| tab.terminal.terminal.grid.rows())
+            .unwrap_or(0);
+        let current_cols = self
+            .active_tab()
+            .map(|tab| tab.terminal.terminal.grid.cols())
+            .unwrap_or(0);
+        let initial_model = build_ui_model(&UiBuildState {
+            window_width: size.width as f32,
+            window_height: size.height as f32,
+            theme: self.theme,
+            settings_open: self.settings_open,
+            tabs: self.tab_views(),
+            active_tab: self.active_tab,
+            font_size,
+            status: self.status_view(current_rows, current_cols),
+        });
+        let (rows, cols) = {
+            let renderer = self
+                .renderer
+                .as_mut()
+                .expect("renderer must exist before refreshing ui");
+            renderer.set_terminal_viewport(initial_model.layout.terminal_viewport);
+            let (rows, cols) = renderer.terminal_size();
+
+            for tab in &mut self.tabs {
+                if tab.terminal.terminal.grid.rows() != rows
+                    || tab.terminal.terminal.grid.cols() != cols
+                {
+                    tab.terminal.resize(rows, cols);
+                    let _ = tab.pty.resize(cols as u16, rows as u16);
+                    tab.terminal.terminal.damage.mark_full_redraw();
+                }
+            }
+
+            (rows, cols)
+        };
+
+        let ui_model = build_ui_model(&UiBuildState {
+            window_width: size.width as f32,
+            window_height: size.height as f32,
+            theme: self.theme,
+            settings_open: self.settings_open,
+            tabs: self.tab_views(),
+            active_tab: self.active_tab,
+            font_size,
+            status: self.status_view(rows, cols),
+        });
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_terminal_viewport(ui_model.layout.terminal_viewport);
+        }
+        self.ui_model = ui_model;
+        self.update_cached_metrics();
+        self.ui_dirty = true;
+        self.update_window_title();
+    }
+
+    /// 创建一个新的终端标签页并切换过去
+    fn create_tab(&mut self) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (rows, cols) = renderer.terminal_size();
+        let title = format!("Shell {}", self.tabs.len() + 1);
+
+        match TerminalTab::new(title, rows, cols, &self.config, &self.theme) {
+            Ok(tab) => {
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len().saturating_sub(1);
+                self.focus_area = FocusArea::Terminal;
+                self.refresh_ui_model();
+            }
+            Err(err) => {
+                tracing::error!("Failed to create tab: {}", err);
+            }
+        }
+    }
+
+    /// 关闭指定标签页，并确保窗口内至少保留一个终端会话
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        if let Some(tab) = self.tabs.get_mut(index) {
+            let _ = tab.pty.kill();
+        }
+
+        if self.tabs.len() == 1 {
+            self.tabs.clear();
+            self.active_tab = 0;
+            self.create_tab();
+            return;
+        }
+
+        self.tabs.remove(index);
+        if self.active_tab > index {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len().saturating_sub(1);
+        }
+        self.refresh_ui_model();
+    }
+
+    /// 应用新的主题预设，并同步 terminal 与 renderer 的默认颜色
+    fn apply_theme_preset(&mut self, preset: ThemePreset) {
+        self.theme = AppTheme::from_preset(preset);
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_terminal_palette(
+                self.theme.terminal_foreground,
+                self.theme.terminal_background,
+            );
+        }
+
+        for tab in &mut self.tabs {
+            tab.terminal.terminal.update_theme(
+                self.theme.terminal_foreground,
+                self.theme.terminal_background,
+            );
+        }
+
+        self.refresh_ui_model();
+    }
+
+    /// 调整字号，并重新计算终端视口对应的行列数
+    fn adjust_font_size(&mut self, delta: f32) {
+        if let Some(renderer) = &mut self.renderer {
+            let next_size = (renderer.font_size() + delta).clamp(10.0, 24.0);
+            renderer.set_font_size(next_size);
+            self.refresh_ui_model();
+        }
+    }
+
+    /// 清空当前活动终端的内容与滚动缓冲区
+    fn clear_active_terminal(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        tab.terminal.terminal.grid.clear_all();
+        tab.terminal.terminal.grid.clear_scrollback();
+        tab.terminal.terminal.grid.reset_display_offset();
+        tab.terminal.terminal.selection = None;
+        tab.terminal.terminal.damage.mark_full_redraw();
+        self.refresh_ui_model();
+    }
+
+    /// 让当前终端视口回到底部
+    fn scroll_active_to_bottom(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        tab.terminal.terminal.grid.reset_display_offset();
+        tab.terminal.terminal.damage.mark_full_redraw();
+        self.refresh_ui_model();
+    }
+
+    /// 处理一个 UI 命中动作
+    fn handle_ui_action(&mut self, action: UiAction) {
+        self.focus_area = FocusArea::Chrome;
+
+        match action {
+            UiAction::CreateTab => self.create_tab(),
+            UiAction::ToggleSettings => {
+                self.settings_open = !self.settings_open;
+                self.refresh_ui_model();
+            }
+            UiAction::CycleTheme => self.apply_theme_preset(self.theme.preset.next()),
+            UiAction::SelectTheme(preset) => self.apply_theme_preset(preset),
+            UiAction::ActivateTab(index) => {
+                if index < self.tabs.len() {
+                    self.active_tab = index;
+                    self.focus_area = FocusArea::Terminal;
+                    self.refresh_ui_model();
+                }
+            }
+            UiAction::CloseTab(index) => self.close_tab(index),
+            UiAction::DecreaseFont => self.adjust_font_size(-1.0),
+            UiAction::IncreaseFont => self.adjust_font_size(1.0),
+            UiAction::CopySelection => self.copy_selection(),
+            UiAction::PasteClipboard => self.paste_clipboard(),
+            UiAction::ClearTerminal => self.clear_active_terminal(),
+            UiAction::ScrollToBottom => self.scroll_active_to_bottom(),
+        }
+    }
+
+    /// 当前鼠标是否位于终端面板区域
+    fn cursor_in_terminal_panel(&self) -> bool {
+        self.last_cursor_position
+            .is_some_and(|(x, y)| self.ui_model.layout.terminal_panel.contains(x, y))
+    }
+
+    /// 将像素坐标转换为终端行列，超出终端边界时会自动夹紧
     fn pixel_to_cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
         if self.cell_width <= 0.0 || self.cell_height <= 0.0 {
             return None;
         }
-        let local_x = (x as f32 - self.padding_x).max(0.0);
-        let local_y = (y as f32 - self.padding_y).max(0.0);
-        let col = (local_x / self.cell_width) as usize;
-        let row = (local_y / self.cell_height) as usize;
+
+        let viewport = self.ui_model.layout.terminal_viewport;
+        let local_x = (x as f32 - viewport.x - self.padding_x).max(0.0);
+        let local_y = (y as f32 - viewport.y - self.padding_y).max(0.0);
+        let mut row = (local_y / self.cell_height) as usize;
+        let mut col = (local_x / self.cell_width) as usize;
+
+        if let Some(tab) = self.active_tab() {
+            let max_row = tab.terminal.terminal.grid.rows().saturating_sub(1);
+            let max_col = tab.terminal.terminal.grid.cols().saturating_sub(1);
+            row = row.min(max_row);
+            col = col.min(max_col);
+        }
+
         Some((row, col))
     }
 
     /// 拖拽选择时，根据鼠标位置自动滚动 scrollback
     fn maybe_auto_scroll_selection(&mut self, y: f64) -> bool {
-        let Some(window) = &self.window else {
-            return false;
-        };
-        let Some(terminal) = &mut self.terminal else {
-            return false;
-        };
-
+        let viewport = self.ui_model.layout.terminal_viewport;
         let threshold = (self.cell_height * 0.75).max(8.0) as f64;
-        let window_height = window.inner_size().height as f64;
-        let top_edge = self.padding_y as f64;
-        let bottom_edge = window_height - self.padding_y as f64;
+        let Some(tab) = self.active_tab_mut() else {
+            return false;
+        };
+        let top_edge = viewport.y as f64;
+        let bottom_edge = viewport.bottom() as f64;
         let mut scrolled = false;
 
         if y < top_edge + threshold {
-            terminal.terminal.grid.scroll_display_up(1);
-            terminal.terminal.damage.mark_full_redraw();
+            tab.terminal.terminal.grid.scroll_display_up(1);
+            tab.terminal.terminal.damage.mark_full_redraw();
             scrolled = true;
         } else if y > bottom_edge - threshold {
-            terminal.terminal.grid.scroll_display_down(1);
-            terminal.terminal.damage.mark_full_redraw();
+            tab.terminal.terminal.grid.scroll_display_down(1);
+            tab.terminal.terminal.damage.mark_full_redraw();
             scrolled = true;
+        }
+
+        if scrolled {
+            self.refresh_ui_model();
         }
 
         scrolled
@@ -173,7 +532,6 @@ impl App {
         let (anchor_start, anchor_end) = anchor;
         let (current_start, current_end) = Self::semantic_bounds(terminal, row, col, mode)?;
 
-        // 当向前反向拖拽时，需要保留锚点的完整尾部；向后拖拽时则保留锚点起点。
         Some(if current_start < anchor_start {
             Selection::new(current_start, anchor_end)
         } else {
@@ -183,74 +541,111 @@ impl App {
 
     /// 当前是否应将鼠标事件交给终端程序，而不是本地选择逻辑
     fn should_report_mouse(&self) -> bool {
-        self.terminal.as_ref().is_some_and(|terminal| {
-            terminal.terminal.mouse_tracking_mode() != MouseTrackingMode::Disabled
-        }) && !self.shift_pressed
+        self.focus_area == FocusArea::Terminal
+            && self.active_tab().is_some_and(|tab| {
+                tab.terminal.terminal.mouse_tracking_mode() != MouseTrackingMode::Disabled
+            })
+            && !self.shift_pressed
     }
 
-    /// 统一向 PTY 写入输入数据，并在写入前重置视口
+    /// 统一向活动 PTY 写入输入数据，并在写入前重置视口
     fn write_input(&mut self, bytes: &[u8]) {
-        if self.shell_exited || bytes.is_empty() {
+        if bytes.is_empty() {
             return;
         }
 
-        if let Some(terminal) = &mut self.terminal {
-            terminal.terminal.grid.reset_display_offset();
-            terminal.terminal.damage.mark_full_redraw();
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if tab.shell_exited {
+            return;
         }
 
-        if let Some(pty) = &mut self.pty {
-            if let Err(err) = pty.write(bytes) {
-                tracing::warn!("Failed to write input to PTY: {}", err);
-            }
+        tab.terminal.terminal.grid.reset_display_offset();
+        tab.terminal.terminal.damage.mark_full_redraw();
+        if let Err(err) = tab.pty.write(bytes) {
+            tracing::warn!("Failed to write input to PTY: {}", err);
         }
     }
 
-    /// 直接向 PTY 写入原始响应数据，不改变本地视口或重绘状态
-    fn write_pty_raw(&mut self, bytes: &[u8]) {
-        if self.shell_exited || bytes.is_empty() {
+    /// 直接向指定标签页 PTY 写入原始响应数据，不改变本地视口或重绘状态
+    fn write_pty_raw(&mut self, index: usize, bytes: &[u8]) {
+        if bytes.is_empty() {
             return;
         }
 
-        if let Some(pty) = &mut self.pty {
-            if let Err(err) = pty.write(bytes) {
-                tracing::warn!("Failed to write raw PTY bytes: {}", err);
-            }
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if tab.shell_exited {
+            return;
+        }
+
+        if let Err(err) = tab.pty.write(bytes) {
+            tracing::warn!("Failed to write raw PTY bytes: {}", err);
         }
     }
 
     /// 处理 shell 退出后的状态与提示
-    fn handle_shell_exit(&mut self, code: i32) {
-        if self.shell_exited {
+    fn handle_shell_exit(&mut self, index: usize, code: i32) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if tab.shell_exited {
             return;
         }
 
-        self.shell_exited = true;
-        self.shell_exit_code = Some(code);
-        self.selecting = false;
-        self.selection_start_cell = None;
-        self.selection_anchor = None;
-        self.pressed_mouse_button = None;
-        self.last_reported_cell = None;
+        tab.shell_exited = true;
+        tab.shell_exit_code = Some(code);
+        tab.selecting = false;
+        tab.selection_start_cell = None;
+        tab.selection_anchor = None;
+        tab.pressed_mouse_button = None;
+        tab.last_reported_cell = None;
 
-        if let Some(window) = &self.window {
-            window.set_title(&format!("SuperPower Terminal - Shell exited ({})", code));
+        let message = format!("\r\n[SuperPower] shell exited with code {}\r\n", code);
+        tab.terminal.process(message.as_bytes());
+        tab.terminal.terminal.damage.mark_full_redraw();
+        self.refresh_ui_model();
+    }
+
+    /// 根据终端 OSC 标题同步标签页标题
+    fn sync_tab_title(&mut self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return false;
+        };
+
+        let terminal_title = tab.terminal.terminal.title.trim();
+        if terminal_title.is_empty() || terminal_title == tab.title {
+            return false;
         }
 
-        if let Some(terminal) = &mut self.terminal {
-            let message = format!("\r\n[SuperPower] shell exited with code {}\r\n", code);
-            terminal.process(message.as_bytes());
-            terminal.terminal.damage.mark_full_redraw();
-        }
+        tab.title = terminal_title.to_string();
+        true
+    }
+
+    /// 把活动标签页标题同步到窗口标题栏
+    fn update_window_title(&self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+
+        let title = self
+            .active_tab()
+            .map(|tab| format!("SuperPower Terminal - {}", tab.title))
+            .unwrap_or_else(|| "SuperPower Terminal".to_string());
+        window.set_title(title.as_str());
     }
 
     /// 将当前终端光标同步给 IME，避免候选框位置漂移
     fn update_ime_cursor_area(&self) {
-        let (Some(window), Some(terminal)) = (&self.window, &self.terminal) else {
+        let (Some(window), Some(tab)) = (&self.window, &self.active_tab()) else {
             return;
         };
 
-        let preedit_col_offset = terminal
+        let viewport = self.ui_model.layout.terminal_viewport;
+        let preedit_col_offset = tab
+            .terminal
             .terminal
             .ime_preedit()
             .map(|preedit| {
@@ -259,9 +654,12 @@ impl App {
             })
             .unwrap_or(0);
 
-        let x = self.padding_x
-            + (terminal.terminal.cursor.col + preedit_col_offset) as f32 * self.cell_width;
-        let y = self.padding_y + terminal.terminal.cursor.row as f32 * self.cell_height;
+        let x = viewport.x
+            + self.padding_x
+            + (tab.terminal.terminal.cursor.col + preedit_col_offset) as f32 * self.cell_width;
+        let y = viewport.y
+            + self.padding_y
+            + tab.terminal.terminal.cursor.row as f32 * self.cell_height;
         window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(x.round() as i32, y.round() as i32),
             winit::dpi::PhysicalSize::new(
@@ -273,14 +671,15 @@ impl App {
 
     /// 上报鼠标事件给终端程序
     fn report_mouse(&mut self, kind: MouseReportKind, row: usize, col: usize) {
-        let Some((mode, sgr)) = self.terminal.as_ref().map(|terminal| {
+        let Some((mode, sgr)) = self.active_tab().map(|tab| {
             (
-                terminal.terminal.mouse_tracking_mode(),
-                terminal.terminal.mouse_sgr_mode(),
+                tab.terminal.terminal.mouse_tracking_mode(),
+                tab.terminal.terminal.mouse_sgr_mode(),
             )
         }) else {
             return;
         };
+
         let encoded = encode_mouse_report(
             kind,
             row,
@@ -292,72 +691,69 @@ impl App {
         );
 
         if let Some(bytes) = encoded {
-            self.write_pty_raw(&bytes);
+            self.write_pty_raw(self.active_tab, &bytes);
         }
 
-        match kind {
-            MouseReportKind::Motion(_) => self.last_reported_cell = Some((row, col)),
-            MouseReportKind::Press(button) => {
-                self.pressed_mouse_button = Some(button);
-                self.last_reported_cell = Some((row, col));
+        if let Some(tab) = self.active_tab_mut() {
+            match kind {
+                MouseReportKind::Motion(_) => tab.last_reported_cell = Some((row, col)),
+                MouseReportKind::Press(button) => {
+                    tab.pressed_mouse_button = Some(button);
+                    tab.last_reported_cell = Some((row, col));
+                }
+                MouseReportKind::Release(_) => {
+                    tab.pressed_mouse_button = None;
+                    tab.last_reported_cell = Some((row, col));
+                }
+                MouseReportKind::WheelUp | MouseReportKind::WheelDown => {
+                    tab.last_reported_cell = Some((row, col));
+                }
             }
-            MouseReportKind::Release(_) => {
-                self.pressed_mouse_button = None;
-                self.last_reported_cell = Some((row, col));
-            }
-            MouseReportKind::WheelUp | MouseReportKind::WheelDown => {
-                self.last_reported_cell = Some((row, col));
-            }
-        }
 
-        if mode == MouseTrackingMode::Disabled {
-            self.last_reported_cell = None;
+            if mode == MouseTrackingMode::Disabled {
+                tab.last_reported_cell = None;
+            }
         }
     }
 
-    /// 复制选区文本到剪贴板
+    /// 复制活动标签页中的选区文本到剪贴板
     fn copy_selection(&mut self) {
-        let terminal = match &self.terminal {
-            Some(t) => t,
-            None => return,
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let Some(selection) = &tab.terminal.terminal.selection else {
+            return;
         };
 
-        let selection = match &terminal.terminal.selection {
-            Some(s) => s,
-            None => return,
-        };
-
-        let text = selection.text(&terminal.terminal.grid);
-
+        let text = selection.text(&tab.terminal.terminal.grid);
         if text.is_empty() {
             return;
         }
 
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
-                if let Err(e) = clipboard.set_text(&text) {
-                    tracing::warn!("Failed to copy to clipboard: {}", e);
+                if let Err(err) = clipboard.set_text(&text) {
+                    tracing::warn!("Failed to copy to clipboard: {}", err);
                 }
             }
-            Err(e) => {
-                tracing::warn!("Failed to access clipboard: {}", e);
+            Err(err) => {
+                tracing::warn!("Failed to access clipboard: {}", err);
             }
         }
     }
 
-    /// 粘贴剪贴板文本
+    /// 从剪贴板读取文本并粘贴到活动终端
     fn paste_clipboard(&mut self) {
         let text = match arboard::Clipboard::new() {
             Ok(mut clipboard) => clipboard.get_text().unwrap_or_default(),
             Err(_) => return,
         };
-
         if text.is_empty() {
             return;
         }
 
-        let payload = if let Some(terminal) = &self.terminal {
-            if terminal.terminal.bracketed_paste_mode() {
+        let payload = if let Some(tab) = self.active_tab() {
+            if tab.terminal.terminal.bracketed_paste_mode() {
                 encode_bracketed_paste(&text)
             } else {
                 text.into_bytes()
@@ -368,6 +764,104 @@ impl App {
 
         self.write_input(&payload);
     }
+
+    /// 处理终端区左键按下，支持字符/单词/整行选择
+    fn handle_terminal_left_press(&mut self) {
+        let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
+        let Some((row, col)) = pointer_cell else {
+            return;
+        };
+
+        let now = Instant::now();
+        let double_click_timeout = Duration::from_millis(450);
+
+        if let Some(tab) = self.active_tab_mut() {
+            if tab.last_click_cell == Some((row, col))
+                && tab
+                    .last_click_time
+                    .is_some_and(|last| now.duration_since(last) <= double_click_timeout)
+            {
+                tab.click_count = if tab.click_count >= 3 {
+                    1
+                } else {
+                    tab.click_count + 1
+                };
+            } else {
+                tab.click_count = 1;
+            }
+
+            tab.last_click_time = Some(now);
+            tab.last_click_cell = Some((row, col));
+            tab.selection_drag_mode = Self::drag_mode_from_clicks(tab.click_count);
+            tab.selecting = true;
+            tab.selection_start_cell = Some((row, col));
+
+            tab.selection_anchor =
+                Self::semantic_bounds(&tab.terminal, row, col, tab.selection_drag_mode);
+
+            if tab.selection_drag_mode == SelectionDragMode::Char {
+                tab.terminal.terminal.selection = None;
+                tab.terminal.terminal.damage.mark_full_redraw();
+            } else if let Some(anchor) = tab.selection_anchor {
+                if let Some(selection) = Self::build_selection_for_drag(
+                    &tab.terminal,
+                    anchor,
+                    tab.selection_drag_mode,
+                    row,
+                    col,
+                ) {
+                    tab.terminal.terminal.selection = Some(selection);
+                    tab.terminal.terminal.damage.mark_full_redraw();
+                }
+            }
+        }
+    }
+
+    /// 处理活动标签页的 PTY 输出和退出事件
+    fn process_pty_events(&mut self) {
+        let mut needs_ui_refresh = false;
+        let tab_len = self.tabs.len();
+
+        for index in 0..tab_len {
+            let mut exit_code = None;
+            let mut pending_output = Vec::new();
+
+            {
+                let tab = &mut self.tabs[index];
+                while let Ok(event) = tab.pty.rx.try_recv() {
+                    match event {
+                        PtyEvent::Data(data) => {
+                            tab.terminal.process(&data);
+                            pending_output.extend_from_slice(
+                                tab.terminal.terminal.take_pending_output().as_slice(),
+                            );
+                        }
+                        PtyEvent::Exit(code) => {
+                            tracing::info!("Shell exited in tab {}", index);
+                            exit_code = Some(code);
+                        }
+                    }
+                }
+            }
+
+            if !pending_output.is_empty() {
+                self.write_pty_raw(index, &pending_output);
+            }
+
+            if let Some(code) = exit_code {
+                self.handle_shell_exit(index, code);
+                needs_ui_refresh = true;
+            }
+
+            if self.sync_tab_title(index) {
+                needs_ui_refresh = true;
+            }
+        }
+
+        if needs_ui_refresh {
+            self.refresh_ui_model();
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -376,30 +870,12 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let config = crate::config::Config::load_from_file(&crate::config::Config::config_path());
         let attrs = WindowAttributes::default()
             .with_title("SuperPower Terminal")
             .with_inner_size(winit::dpi::LogicalSize::new(
-                config.window.width,
-                config.window.height,
+                self.config.window.width,
+                self.config.window.height,
             ));
-        // 配置颜色解析失败时回退到终端内置默认值，避免启动时中断。
-        let default_foreground = crate::config::Config::parse_color(&config.colors.foreground)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "Invalid foreground color '{}', using default",
-                    config.colors.foreground
-                );
-                Color::DEFAULT_FG
-            });
-        let default_background = crate::config::Config::parse_color(&config.colors.background)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "Invalid background color '{}', using default",
-                    config.colors.background
-                );
-                Color::DEFAULT_BG
-            });
 
         let window = Arc::new(
             event_loop
@@ -408,41 +884,24 @@ impl ApplicationHandler for App {
         );
         window.set_ime_allowed(true);
 
-        let renderer = pollster::block_on(Renderer::new(
+        let mut renderer = pollster::block_on(Renderer::new(
             Arc::clone(&window),
             RendererOptions {
-                font_family: config.font.family.clone(),
-                font_size: config.font.size,
-                default_foreground,
-                default_background,
-                padding_x: config.window.padding_x,
-                padding_y: config.window.padding_y,
+                font_family: self.config.font.family.clone(),
+                font_size: self.config.font.size,
+                default_foreground: self.theme.terminal_foreground,
+                default_background: self.theme.terminal_background,
+                padding_x: self.config.window.padding_x,
+                padding_y: self.config.window.padding_y,
             },
         ));
-        let (rows, cols) = renderer.terminal_size();
-        self.cell_width = renderer.cell_width();
-        self.cell_height = renderer.cell_height();
-        self.padding_x = renderer.padding_x();
-        self.padding_y = renderer.padding_y();
-        let terminal = TerminalHandler::with_theme(
-            rows,
-            cols,
-            config.scrollback.limit,
-            default_foreground,
-            default_background,
-        );
-        let pty = PtySession::new(
-            cols as u16,
-            rows as u16,
-            &config.shell.program,
-            &config.shell.args,
-        )
-        .expect("Failed to create PTY session");
 
+        renderer.set_terminal_viewport(self.ui_model.layout.terminal_viewport);
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.terminal = Some(terminal);
-        self.pty = Some(pty);
+        self.update_cached_metrics();
+        self.refresh_ui_model();
+        self.create_tab();
     }
 
     fn window_event(
@@ -460,18 +919,7 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(physical_size);
                 }
-                if let (Some(renderer), Some(terminal), Some(pty)) =
-                    (&self.renderer, &mut self.terminal, &mut self.pty)
-                {
-                    let (new_rows, new_cols) = renderer.terminal_size();
-                    terminal.resize(new_rows, new_cols);
-                    let _ = pty.resize(new_cols as u16, new_rows as u16);
-                    // 更新缓存的单元格尺寸
-                    self.cell_width = renderer.cell_width();
-                    self.cell_height = renderer.cell_height();
-                    self.padding_x = renderer.padding_x();
-                    self.padding_y = renderer.padding_y();
-                }
+                self.refresh_ui_model();
             }
 
             WindowEvent::ScaleFactorChanged {
@@ -481,65 +929,43 @@ impl ApplicationHandler for App {
                 tracing::info!("DPI scale factor changed to {}", scale_factor);
                 if let Some(renderer) = &mut self.renderer {
                     renderer.update_font_metrics(scale_factor);
-                    self.cell_width = renderer.cell_width();
-                    self.cell_height = renderer.cell_height();
-                    self.padding_x = renderer.padding_x();
-                    self.padding_y = renderer.padding_y();
                 }
-                if let (Some(renderer), Some(terminal), Some(pty)) =
-                    (&self.renderer, &mut self.terminal, &mut self.pty)
-                {
-                    let (new_rows, new_cols) = renderer.terminal_size();
-                    terminal.resize(new_rows, new_cols);
-                    let _ = pty.resize(new_cols as u16, new_rows as u16);
-                }
+                self.refresh_ui_model();
             }
 
             WindowEvent::RedrawRequested => {
-                let mut exit_code = None;
-                let mut pending_output = Vec::new();
-                if let (Some(pty), Some(terminal)) = (&mut self.pty, &mut self.terminal) {
-                    while let Ok(event) = pty.rx.try_recv() {
-                        match event {
-                            PtyEvent::Data(data) => {
-                                terminal.process(&data);
-                                pending_output.extend_from_slice(
-                                    terminal.terminal.take_pending_output().as_slice(),
-                                );
-                            }
-                            PtyEvent::Exit(code) => {
-                                tracing::info!("Shell exited");
-                                exit_code = Some(code);
-                            }
-                        }
-                    }
-                }
+                self.process_pty_events();
 
-                if let Some(code) = exit_code {
-                    self.handle_shell_exit(code);
-                }
+                let active_index = self.active_tab;
+                let chrome = self.ui_model.chrome.clone();
+                let should_render = self.tabs.get(active_index).is_some_and(|tab| {
+                    self.ui_dirty
+                        || self
+                            .renderer
+                            .as_ref()
+                            .is_some_and(|renderer| renderer.needs_render(&tab.terminal))
+                });
 
-                if !pending_output.is_empty() {
-                    self.write_pty_raw(&pending_output);
-                }
-
-                if let (Some(renderer), Some(terminal)) = (&mut self.renderer, &mut self.terminal) {
-                    if renderer.needs_render(terminal) {
-                        match renderer.render(terminal) {
+                if should_render {
+                    if let (Some(renderer), Some(tab)) =
+                        (&mut self.renderer, self.tabs.get(active_index))
+                    {
+                        match renderer.render(&tab.terminal, &chrome) {
                             Ok(_) => {}
                             Err(wgpu::SurfaceError::Lost) => {}
                             Err(wgpu::SurfaceError::OutOfMemory) => {
                                 event_loop.exit();
                             }
-                            Err(e) => {
-                                tracing::error!("Render error: {:?}", e);
+                            Err(err) => {
+                                tracing::error!("Render error: {:?}", err);
                             }
                         }
                     }
-                }
 
-                if let Some(terminal) = &mut self.terminal {
-                    terminal.terminal.damage.clear();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.terminal.terminal.damage.clear();
+                    }
+                    self.ui_dirty = false;
                 }
 
                 self.update_ime_cursor_area();
@@ -550,29 +976,46 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // 先处理复制/粘贴快捷键
                 if self.ctrl_pressed && self.shift_pressed {
-                    use winit::keyboard::{KeyCode, PhysicalKey};
-                    if let PhysicalKey::Code(keycode) = event.physical_key {
-                        if keycode == KeyCode::KeyC {
-                            self.copy_selection();
-                            return;
-                        }
-                        if keycode == KeyCode::KeyV {
-                            self.paste_clipboard();
-                            return;
+                    use winit::keyboard::KeyCode;
+
+                    if let winit::keyboard::PhysicalKey::Code(keycode) = event.physical_key {
+                        match keycode {
+                            KeyCode::KeyC => {
+                                self.copy_selection();
+                                return;
+                            }
+                            KeyCode::KeyV => {
+                                self.paste_clipboard();
+                                return;
+                            }
+                            KeyCode::KeyT => {
+                                self.create_tab();
+                                return;
+                            }
+                            KeyCode::KeyW => {
+                                self.close_tab(self.active_tab);
+                                return;
+                            }
+                            _ => {}
                         }
                     }
                 }
 
-                // 其他键盘输入
-                if let Some(terminal) = &mut self.terminal {
+                if self.focus_area != FocusArea::Terminal {
+                    return;
+                }
+
+                let shift_pressed = self.shift_pressed;
+                let ctrl_pressed = self.ctrl_pressed;
+                let alt_pressed = self.alt_pressed;
+                if let Some(tab) = self.active_tab_mut() {
                     let payload = handle_key_input(
                         event,
-                        terminal,
-                        self.shift_pressed,
-                        self.ctrl_pressed,
-                        self.alt_pressed,
+                        &mut tab.terminal,
+                        shift_pressed,
+                        ctrl_pressed,
+                        alt_pressed,
                     );
                     if let Some(bytes) = payload {
                         self.write_input(&bytes);
@@ -586,19 +1029,23 @@ impl ApplicationHandler for App {
                 self.alt_pressed = modifiers.state().alt_key();
             }
 
-            WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
-                if let Some(terminal) = &mut self.terminal {
-                    terminal.terminal.clear_ime_preedit();
+            WindowEvent::Ime(Ime::Commit(text))
+                if !text.is_empty() && self.focus_area == FocusArea::Terminal =>
+            {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.terminal.terminal.clear_ime_preedit();
                 }
                 self.write_input(text.as_bytes());
             }
 
-            WindowEvent::Ime(Ime::Preedit(text, cursor_range)) => {
-                if let Some(terminal) = &mut self.terminal {
+            WindowEvent::Ime(Ime::Preedit(text, cursor_range))
+                if self.focus_area == FocusArea::Terminal =>
+            {
+                if let Some(tab) = self.active_tab_mut() {
                     if text.is_empty() {
-                        terminal.terminal.clear_ime_preedit();
+                        tab.terminal.terminal.clear_ime_preedit();
                     } else {
-                        terminal.terminal.set_ime_preedit(
+                        tab.terminal.terminal.set_ime_preedit(
                             text.clone(),
                             cursor_range
                                 .map(|range| preedit_byte_range_to_char_range(&text, range)),
@@ -608,14 +1055,19 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Ime(Ime::Disabled) => {
-                if let Some(terminal) = &mut self.terminal {
-                    terminal.terminal.clear_ime_preedit();
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.terminal.terminal.clear_ime_preedit();
                 }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                if !self.cursor_in_terminal_panel() {
+                    return;
+                }
+
                 if self.should_report_mouse() {
-                    if let Some((row, col)) = self.pointer_cell {
+                    let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
+                    if let Some((row, col)) = pointer_cell {
                         let steps = match delta {
                             winit::event::MouseScrollDelta::LineDelta(_, y) => y.round() as isize,
                             winit::event::MouseScrollDelta::PixelDelta(pos) => {
@@ -632,27 +1084,55 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
-                } else if let Some(terminal) = &mut self.terminal {
+                    return;
+                }
+
+                if let Some(tab) = self.active_tab_mut() {
                     let lines = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => (-y * 3.0) as isize,
                         winit::event::MouseScrollDelta::PixelDelta(pos) => (-pos.y / 20.0) as isize,
                     };
                     if lines > 0 {
-                        terminal.terminal.grid.scroll_display_up(lines as usize);
-                        terminal.terminal.damage.mark_full_redraw();
+                        tab.terminal.terminal.grid.scroll_display_up(lines as usize);
+                        tab.terminal.terminal.damage.mark_full_redraw();
                     } else if lines < 0 {
-                        terminal
+                        tab.terminal
                             .terminal
                             .grid
                             .scroll_display_down((-lines) as usize);
-                        terminal.terminal.damage.mark_full_redraw();
+                        tab.terminal.terminal.damage.mark_full_redraw();
                     }
+                    self.refresh_ui_model();
                 }
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                let cursor = self.last_cursor_position.unwrap_or((0.0, 0.0));
+
+                if state == ElementState::Pressed && !self.cursor_in_terminal_panel() {
+                    self.focus_area = FocusArea::Chrome;
+                }
+
+                if state == ElementState::Released {
+                    if let Some(action) = self.ui_model.hit_test(cursor.0, cursor.1) {
+                        self.handle_ui_action(action);
+                        return;
+                    }
+                }
+
+                if !self.cursor_in_terminal_panel() {
+                    return;
+                }
+
+                self.focus_area = FocusArea::Terminal;
+                let pointer_cell = self.pixel_to_cell(cursor.0, cursor.1);
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.pointer_cell = pointer_cell;
+                }
+
                 if self.should_report_mouse() {
-                    if let Some((row, col)) = self.pointer_cell {
+                    let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
+                    if let Some((row, col)) = pointer_cell {
                         match (button, state) {
                             (
                                 MouseButton::Left | MouseButton::Middle | MouseButton::Right,
@@ -664,7 +1144,10 @@ impl ApplicationHandler for App {
                                 MouseButton::Left | MouseButton::Middle | MouseButton::Right,
                                 ElementState::Released,
                             ) => {
-                                let release_button = self.pressed_mouse_button.unwrap_or(button);
+                                let release_button = self
+                                    .active_tab()
+                                    .and_then(|tab| tab.pressed_mouse_button)
+                                    .unwrap_or(button);
                                 self.report_mouse(
                                     MouseReportKind::Release(release_button),
                                     row,
@@ -679,63 +1162,17 @@ impl ApplicationHandler for App {
 
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => {
-                        let Some((row, col)) = self.pointer_cell else {
-                            return;
-                        };
-
-                        let now = Instant::now();
-                        let double_click_timeout = Duration::from_millis(450);
-                        if self.last_click_cell == Some((row, col))
-                            && self.last_click_time.is_some_and(|last| {
-                                now.duration_since(last) <= double_click_timeout
-                            })
-                        {
-                            self.click_count = if self.click_count >= 3 {
-                                1
-                            } else {
-                                self.click_count + 1
-                            };
-                        } else {
-                            self.click_count = 1;
-                        }
-                        self.last_click_time = Some(now);
-                        self.last_click_cell = Some((row, col));
-                        self.selection_drag_mode = Self::drag_mode_from_clicks(self.click_count);
-                        self.selecting = true;
-                        self.selection_start_cell = Some((row, col));
-
-                        if let Some(terminal) = &mut self.terminal {
-                            self.selection_anchor =
-                                Self::semantic_bounds(terminal, row, col, self.selection_drag_mode);
-
-                            if self.selection_drag_mode == SelectionDragMode::Char {
-                                terminal.terminal.selection = None;
-                                terminal.terminal.damage.mark_full_redraw();
-                            } else if let Some(anchor) = self.selection_anchor {
-                                if let Some(selection) = Self::build_selection_for_drag(
-                                    terminal,
-                                    anchor,
-                                    self.selection_drag_mode,
-                                    row,
-                                    col,
-                                ) {
-                                    terminal.terminal.selection = Some(selection);
-                                    terminal.terminal.damage.mark_full_redraw();
-                                }
-                            }
-                        }
+                        self.handle_terminal_left_press();
                     }
                     (MouseButton::Left, ElementState::Released) => {
-                        self.selecting = false;
-                        self.selection_start_cell = None;
-                        self.selection_anchor = None;
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.selecting = false;
+                            tab.selection_start_cell = None;
+                            tab.selection_anchor = None;
+                        }
                     }
-                    (MouseButton::Right, ElementState::Released) => {
-                        // 右键粘贴
-                        self.paste_clipboard();
-                    }
-                    (MouseButton::Middle, ElementState::Released) => {
-                        // 中键粘贴
+                    (MouseButton::Right, ElementState::Released)
+                    | (MouseButton::Middle, ElementState::Released) => {
                         self.paste_clipboard();
                     }
                     _ => {}
@@ -743,25 +1180,37 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer_cell = self.pixel_to_cell(position.x, position.y);
+                self.last_cursor_position = Some((position.x, position.y));
+                let cursor_in_terminal = self.cursor_in_terminal_panel();
+                let pointer_cell = self.pixel_to_cell(position.x, position.y);
+
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.pointer_cell = if cursor_in_terminal || tab.selecting {
+                        pointer_cell
+                    } else {
+                        None
+                    };
+                }
+
                 if self.should_report_mouse() {
-                    let Some((row, col)) = self.pointer_cell else {
+                    let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
+                    let Some((row, col)) = pointer_cell else {
                         return;
                     };
-                    let Some(terminal) = &self.terminal else {
+                    let Some(tab) = self.active_tab() else {
                         return;
                     };
 
-                    let mode = terminal.terminal.mouse_tracking_mode();
+                    let mode = tab.terminal.terminal.mouse_tracking_mode();
                     let should_report_motion = match mode {
                         MouseTrackingMode::Disabled | MouseTrackingMode::Normal => false,
-                        MouseTrackingMode::ButtonEvent => self.pressed_mouse_button.is_some(),
+                        MouseTrackingMode::ButtonEvent => tab.pressed_mouse_button.is_some(),
                         MouseTrackingMode::AnyEvent => true,
                     };
 
-                    if should_report_motion && self.last_reported_cell != Some((row, col)) {
+                    if should_report_motion && tab.last_reported_cell != Some((row, col)) {
                         self.report_mouse(
-                            MouseReportKind::Motion(self.pressed_mouse_button),
+                            MouseReportKind::Motion(tab.pressed_mouse_button),
                             row,
                             col,
                         );
@@ -769,39 +1218,39 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                if !self.selecting {
+                let selecting = self.active_tab().is_some_and(|tab| tab.selecting);
+                if !selecting {
                     return;
                 }
 
                 self.maybe_auto_scroll_selection(position.y);
 
-                let Some((row, col)) = self.pointer_cell else {
+                let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
+                let Some((row, col)) = pointer_cell else {
                     return;
                 };
 
-                let Some(terminal) = &mut self.terminal else {
-                    return;
-                };
+                if let Some(tab) = self.active_tab_mut() {
+                    let grid_rows = tab.terminal.terminal.grid.rows();
+                    let grid_cols = tab.terminal.terminal.grid.cols();
+                    let row = row.min(grid_rows.saturating_sub(1));
+                    let col = col.min(grid_cols.saturating_sub(1));
 
-                let grid_rows = terminal.terminal.grid.rows();
-                let grid_cols = terminal.terminal.grid.cols();
-                let row = row.min(grid_rows - 1);
-                let col = col.min(grid_cols - 1);
+                    if tab.selection_start_cell.is_none() {
+                        tab.selection_start_cell = Some((row, col));
+                    }
 
-                if self.selection_start_cell.is_none() {
-                    self.selection_start_cell = Some((row, col));
-                }
-
-                if let Some(anchor) = self.selection_anchor {
-                    if let Some(selection) = Self::build_selection_for_drag(
-                        terminal,
-                        anchor,
-                        self.selection_drag_mode,
-                        row,
-                        col,
-                    ) {
-                        terminal.terminal.selection = Some(selection);
-                        terminal.terminal.damage.mark_full_redraw();
+                    if let Some(anchor) = tab.selection_anchor {
+                        if let Some(selection) = Self::build_selection_for_drag(
+                            &tab.terminal,
+                            anchor,
+                            tab.selection_drag_mode,
+                            row,
+                            col,
+                        ) {
+                            tab.terminal.terminal.selection = Some(selection);
+                            tab.terminal.terminal.damage.mark_full_redraw();
+                        }
                     }
                 }
             }
@@ -809,6 +1258,15 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+}
+
+/// 获取 shell 展示名，优先保留可读的文件名
+fn shell_label(program: &str) -> String {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_string()
 }
 
 /// 处理键盘输入
@@ -1064,7 +1522,6 @@ fn encode_mouse_report(
         return Some(format!("\x1b[<{};{};{}{}", base, x, y, final_char).into_bytes());
     }
 
-    // 传统 X10 编码坐标范围较小，超出时直接截断到可表示范围。
     let encoded_x = (x.min(223) + 32) as u8;
     let encoded_y = (y.min(223) + 32) as u8;
     let encoded_button = match kind {
@@ -1176,5 +1633,12 @@ mod tests {
     fn preedit_visual_offset_counts_wide_chars() {
         assert_eq!(preedit_visual_offset("啊b", 1), 2);
         assert_eq!(preedit_visual_offset("啊b", 2), 3);
+    }
+
+    /// 验证 shell 名称会优先使用文件名部分
+    #[test]
+    fn shell_label_uses_file_name() {
+        assert_eq!(shell_label("C:\\Windows\\System32\\cmd.exe"), "cmd.exe");
+        assert_eq!(shell_label("powershell"), "powershell");
     }
 }

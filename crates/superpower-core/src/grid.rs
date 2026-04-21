@@ -322,6 +322,29 @@ impl Grid {
         self.display_offset = 0;
     }
 
+    /// 更新 Grid 的默认前景色/背景色，并同步替换仍引用旧默认值的单元格
+    pub fn update_default_colors(
+        &mut self,
+        old_foreground: Color,
+        old_background: Color,
+        new_foreground: Color,
+        new_background: Color,
+    ) {
+        self.template_cell
+            .reset_with_colors(new_foreground, new_background);
+
+        for row in self.lines.iter_mut().chain(self.scrollback.iter_mut()) {
+            for cell in row {
+                if cell.foreground == old_foreground {
+                    cell.foreground = new_foreground;
+                }
+                if cell.background == old_background {
+                    cell.background = new_background;
+                }
+            }
+        }
+    }
+
     /// 获取视口偏移
     pub fn display_offset(&self) -> usize {
         self.display_offset

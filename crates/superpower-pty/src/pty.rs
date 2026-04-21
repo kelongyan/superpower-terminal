@@ -122,4 +122,11 @@ impl PtySession {
     pub fn is_alive(&mut self) -> bool {
         self.child.try_wait().ok().flatten().is_none()
     }
+
+    /// 主动结束子进程，用于标签页关闭等场景
+    pub fn kill(&mut self) -> Result<(), String> {
+        self.child
+            .kill()
+            .map_err(|e| format!("PTY kill error: {}", e))
+    }
 }

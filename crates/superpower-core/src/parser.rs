@@ -216,6 +216,36 @@ impl Terminal {
         self.damage.resize(new_rows);
     }
 
+    /// 更新终端默认主题，并尽量把仍沿用旧默认色的内容同步到新主题
+    pub fn update_theme(&mut self, default_foreground: Color, default_background: Color) {
+        let old_foreground = self.default_foreground;
+        let old_background = self.default_background;
+
+        self.grid.update_default_colors(
+            old_foreground,
+            old_background,
+            default_foreground,
+            default_background,
+        );
+        self.alternate_grid.update_default_colors(
+            old_foreground,
+            old_background,
+            default_foreground,
+            default_background,
+        );
+
+        if self.foreground == old_foreground {
+            self.foreground = default_foreground;
+        }
+        if self.background == old_background {
+            self.background = default_background;
+        }
+
+        self.default_foreground = default_foreground;
+        self.default_background = default_background;
+        self.damage.mark_full_redraw();
+    }
+
     // === 内部辅助方法 ===
 
     fn make_cell(&self, character: char) -> Cell {
