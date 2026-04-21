@@ -225,6 +225,10 @@ impl DwRasterizer {
                 )
                 .ok()?;
         }
+        // DirectWrite 的 aliased 纹理常返回 0..16 的 coverage 值。
+        // wgpu 这里使用的是 `R8Unorm`，如果不先放大到 0..255，
+        // 实际渲染出来的文字会几乎透明，看起来像“只有背景块没有文字”。
+        normalize_aliased_alpha_bitmap(&mut bitmap);
 
         Some(DwGlyphBitmap {
             width,
@@ -380,4 +384,42 @@ fn borrow_font_face(font_face: &IDWriteFontFace) -> ManuallyDrop<Option<IDWriteF
     let raw = Interface::as_raw(font_face);
     let borrowed: Option<IDWriteFontFace> = unsafe { std::mem::transmute(raw) };
     ManuallyDrop::new(borrowed)
+}
+
+/// 将 DirectWrite aliased 纹理的 coverage 值归一化到完整 8bit alpha 范围
+fn normalize_aliased_alpha_bitmap(bitmap: &mut [u8]) {
+    let Some(max_value) = bitmap.iter().copied().max() else {
+        return;
+    };
+
+    // 只有在明显属于 4bit/5bit coverage 的情况下才放大，
+    // 避免未来切换到其它纹理格式时误伤已经是 0..255 的位图。
+    if max_value > 16 {
+        return;
+    }
+
+    for alpha in bitmap {
+        *alpha = ((*alpha as u16 * 255) / 16).min(255) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_aliased_alpha_bitmap;
+
+    /// 验证 DirectWrite 的低位 coverage 值会被正确放大到 8bit alpha
+    #[test]
+    fn normalize_aliased_alpha_bitmap_expands_low_range_values() {
+        let mut bitmap = vec![0, 8, 16];
+        normalize_aliased_alpha_bitmap(&mut bitmap);
+        assert_eq!(bitmap, vec![0, 127, 255]);
+    }
+
+    /// 验证已经是 8bit 范围的位图不会再次被错误放大
+    #[test]
+    fn normalize_aliased_alpha_bitmap_keeps_full_range_values() {
+        let mut bitmap = vec![0, 64, 255];
+        normalize_aliased_alpha_bitmap(&mut bitmap);
+        assert_eq!(bitmap, vec![0, 64, 255]);
+    }
 }
