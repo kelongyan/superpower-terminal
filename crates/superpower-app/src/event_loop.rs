@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use superpower_core::{
-    cell_bounds, line_bounds, word_bounds, Color, MouseTrackingMode, Selection, SelectionPos,
-    TerminalHandler,
+    cell_bounds, char_width, line_bounds, word_bounds, Color, MouseTrackingMode, Selection,
+    SelectionPos, TerminalHandler,
 };
 use superpower_pty::{PtyEvent, PtySession};
 use superpower_renderer::{Renderer, RendererOptions};
@@ -111,6 +111,34 @@ impl App {
         Some((row, col))
     }
 
+    /// 拖拽选择时，根据鼠标位置自动滚动 scrollback
+    fn maybe_auto_scroll_selection(&mut self, y: f64) -> bool {
+        let Some(window) = &self.window else {
+            return false;
+        };
+        let Some(terminal) = &mut self.terminal else {
+            return false;
+        };
+
+        let threshold = (self.cell_height * 0.75).max(8.0) as f64;
+        let window_height = window.inner_size().height as f64;
+        let top_edge = self.padding_y as f64;
+        let bottom_edge = window_height - self.padding_y as f64;
+        let mut scrolled = false;
+
+        if y < top_edge + threshold {
+            terminal.terminal.grid.scroll_display_up(1);
+            terminal.terminal.damage.mark_full_redraw();
+            scrolled = true;
+        } else if y > bottom_edge - threshold {
+            terminal.terminal.grid.scroll_display_down(1);
+            terminal.terminal.damage.mark_full_redraw();
+            scrolled = true;
+        }
+
+        scrolled
+    }
+
     /// 根据连续点击次数推导当前选择模式
     fn drag_mode_from_clicks(click_count: u8) -> SelectionDragMode {
         match click_count {
@@ -209,7 +237,17 @@ impl App {
             return;
         };
 
-        let x = self.padding_x + terminal.terminal.cursor.col as f32 * self.cell_width;
+        let preedit_col_offset = terminal
+            .terminal
+            .ime_preedit()
+            .map(|preedit| {
+                let cursor_chars = preedit.cursor_range.map(|(start, _)| start).unwrap_or(0);
+                preedit_visual_offset(preedit.text.as_str(), cursor_chars)
+            })
+            .unwrap_or(0);
+
+        let x = self.padding_x
+            + (terminal.terminal.cursor.col + preedit_col_offset) as f32 * self.cell_width;
         let y = self.padding_y + terminal.terminal.cursor.row as f32 * self.cell_height;
         window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(x.round() as i32, y.round() as i32),
@@ -528,7 +566,30 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                if let Some(terminal) = &mut self.terminal {
+                    terminal.terminal.clear_ime_preedit();
+                }
                 self.write_input(text.as_bytes());
+            }
+
+            WindowEvent::Ime(Ime::Preedit(text, cursor_range)) => {
+                if let Some(terminal) = &mut self.terminal {
+                    if text.is_empty() {
+                        terminal.terminal.clear_ime_preedit();
+                    } else {
+                        terminal.terminal.set_ime_preedit(
+                            text.clone(),
+                            cursor_range
+                                .map(|range| preedit_byte_range_to_char_range(&text, range)),
+                        );
+                    }
+                }
+            }
+
+            WindowEvent::Ime(Ime::Disabled) => {
+                if let Some(terminal) = &mut self.terminal {
+                    terminal.terminal.clear_ime_preedit();
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -690,6 +751,8 @@ impl ApplicationHandler for App {
                 if !self.selecting {
                     return;
                 }
+
+                self.maybe_auto_scroll_selection(position.y);
 
                 let Some((row, col)) = self.pointer_cell else {
                     return;
@@ -1008,6 +1071,25 @@ fn button_code(button: MouseButton) -> Option<usize> {
     }
 }
 
+/// 将 IME 提供的字节范围转换为字符索引范围
+fn preedit_byte_range_to_char_range(text: &str, range: (usize, usize)) -> (usize, usize) {
+    let start = byte_offset_to_char_index(text, range.0);
+    let end = byte_offset_to_char_index(text, range.1);
+    (start, end)
+}
+
+/// 将 UTF-8 字节偏移转换为字符索引
+fn byte_offset_to_char_index(text: &str, byte_offset: usize) -> usize {
+    text.char_indices()
+        .take_while(|(idx, _)| *idx < byte_offset)
+        .count()
+}
+
+/// 计算 preedit 光标在终端网格中的列偏移
+fn preedit_visual_offset(text: &str, cursor_chars: usize) -> usize {
+    text.chars().take(cursor_chars).map(char_width).sum()
+}
+
 /// 主入口
 pub fn run() {
     let event_loop = winit::event_loop::EventLoop::new().expect("Failed to create event loop");
@@ -1059,5 +1141,19 @@ mod tests {
         .unwrap();
         assert_eq!(encoded.len(), 6);
         assert_eq!(&encoded[..3], b"\x1b[M");
+    }
+
+    /// 验证 IME 字节范围会被正确映射到字符索引
+    #[test]
+    fn preedit_range_maps_to_char_indices() {
+        let range = preedit_byte_range_to_char_range("啊b", (3, 4));
+        assert_eq!(range, (1, 2));
+    }
+
+    /// 验证 preedit 光标列偏移会按字符宽度累计
+    #[test]
+    fn preedit_visual_offset_counts_wide_chars() {
+        assert_eq!(preedit_visual_offset("啊b", 1), 2);
+        assert_eq!(preedit_visual_offset("啊b", 2), 3);
     }
 }

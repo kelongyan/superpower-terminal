@@ -1,4 +1,4 @@
-use crate::cell::{Cell, CellFlags, Color};
+use crate::cell::{char_width, Cell, CellFlags, Color};
 use crate::cursor::{Cursor, CursorShape};
 use crate::damage::DamageTracker;
 use crate::grid::Grid;
@@ -38,6 +38,15 @@ pub enum MouseTrackingMode {
     AnyEvent,
 }
 
+/// IME 预编辑状态
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImePreedit {
+    /// 当前预编辑文本
+    pub text: String,
+    /// 预编辑光标范围（按字符索引）
+    pub cursor_range: Option<(usize, usize)>,
+}
+
 /// 终端 — 组合 Grid + Cursor + 解析器
 pub struct Terminal {
     pub grid: Grid,
@@ -75,6 +84,8 @@ pub struct Terminal {
     alternate_cursor: Cursor,
     /// alternate screen 对应的保存光标
     alternate_saved_cursor: Cursor,
+    /// IME 预编辑状态
+    ime_preedit: Option<ImePreedit>,
     /// 窗口标题
     pub title: String,
     /// 当前选区
@@ -179,6 +190,7 @@ impl Terminal {
             ),
             alternate_cursor: Cursor::new(),
             alternate_saved_cursor: Cursor::new(),
+            ime_preedit: None,
             title: String::new(),
             selection: None,
         };
@@ -248,6 +260,7 @@ impl Terminal {
         std::mem::swap(&mut self.saved_cursor, &mut self.alternate_saved_cursor);
 
         self.alternate_screen = true;
+        self.ime_preedit = None;
         self.selection = None;
         self.damage.mark_full_redraw();
     }
@@ -263,6 +276,7 @@ impl Terminal {
         std::mem::swap(&mut self.saved_cursor, &mut self.alternate_saved_cursor);
 
         self.alternate_screen = false;
+        self.ime_preedit = None;
         self.selection = None;
         self.damage.mark_full_redraw();
     }
@@ -371,6 +385,29 @@ impl Terminal {
         self.alternate_screen
     }
 
+    /// 设置 IME 预编辑文本
+    pub fn set_ime_preedit(&mut self, text: String, cursor_range: Option<(usize, usize)>) {
+        if text.is_empty() {
+            self.clear_ime_preedit();
+            return;
+        }
+
+        self.ime_preedit = Some(ImePreedit { text, cursor_range });
+        self.damage.mark_full_redraw();
+    }
+
+    /// 清除 IME 预编辑文本
+    pub fn clear_ime_preedit(&mut self) {
+        if self.ime_preedit.take().is_some() {
+            self.damage.mark_full_redraw();
+        }
+    }
+
+    /// 获取 IME 预编辑状态
+    pub fn ime_preedit(&self) -> Option<&ImePreedit> {
+        self.ime_preedit.as_ref()
+    }
+
     fn newline(&mut self) {
         let row = self.cursor.row;
         let bottom = self.grid.scroll_bottom();
@@ -416,7 +453,7 @@ impl Terminal {
         let col = self.cursor.col;
 
         // 检查是否是宽字符
-        let width = unicode_width(c);
+        let width = char_width(c);
         if width == 0 {
             // 不可见字符，跳过
             return;
@@ -565,27 +602,6 @@ fn color_256(idx: usize) -> Color {
         // 灰度 24 级
         let v = 8 + (idx - 232) as u8 * 10;
         Color::new(v, v, v)
-    }
-}
-
-/// 简易 Unicode 字符宽度判断
-fn unicode_width(c: char) -> usize {
-    // CJK 统一汉字、全角字符等
-    if c as u32 >= 0x1100
-        && ((c as u32 >= 0x1100 && c as u32 <= 0x115F)
-            || (c as u32 >= 0x2E80 && c as u32 <= 0x303F)
-            || (c as u32 >= 0x3040 && c as u32 <= 0x9FFF)
-            || (c as u32 >= 0xAC00 && c as u32 <= 0xD7AF)
-            || (c as u32 >= 0xF900 && c as u32 <= 0xFAFF)
-            || (c as u32 >= 0xFE30 && c as u32 <= 0xFE6F)
-            || (c as u32 >= 0xFF01 && c as u32 <= 0xFF60)
-            || (c as u32 >= 0xFFE0 && c as u32 <= 0xFFE6)
-            || (c as u32 >= 0x20000 && c as u32 <= 0x2FFFD)
-            || (c as u32 >= 0x30000 && c as u32 <= 0x3FFFD))
-    {
-        2
-    } else {
-        1
     }
 }
 
@@ -920,5 +936,19 @@ mod tests {
         );
         assert!(!handler.terminal.mouse_sgr_mode());
         assert!(!handler.terminal.bracketed_paste_mode());
+    }
+
+    #[test]
+    fn test_ime_preedit_state() {
+        let mut handler = TerminalHandler::new(24, 80, 1000);
+        handler
+            .terminal
+            .set_ime_preedit("ni".to_string(), Some((1, 1)));
+        let preedit = handler.terminal.ime_preedit().unwrap();
+        assert_eq!(preedit.text, "ni");
+        assert_eq!(preedit.cursor_range, Some((1, 1)));
+
+        handler.terminal.clear_ime_preedit();
+        assert!(handler.terminal.ime_preedit().is_none());
     }
 }

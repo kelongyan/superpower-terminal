@@ -140,3 +140,24 @@ impl Default for Cell {
         Self::blank()
     }
 }
+
+/// 终端字符宽度判断
+pub fn char_width(c: char) -> usize {
+    // CJK 统一汉字、全角字符等
+    if c as u32 >= 0x1100
+        && ((c as u32 >= 0x1100 && c as u32 <= 0x115F)
+            || (c as u32 >= 0x2E80 && c as u32 <= 0x303F)
+            || (c as u32 >= 0x3040 && c as u32 <= 0x9FFF)
+            || (c as u32 >= 0xAC00 && c as u32 <= 0xD7AF)
+            || (c as u32 >= 0xF900 && c as u32 <= 0xFAFF)
+            || (c as u32 >= 0xFE30 && c as u32 <= 0xFE6F)
+            || (c as u32 >= 0xFF01 && c as u32 <= 0xFF60)
+            || (c as u32 >= 0xFFE0 && c as u32 <= 0xFFE6)
+            || (c as u32 >= 0x20000 && c as u32 <= 0x2FFFD)
+            || (c as u32 >= 0x30000 && c as u32 <= 0x3FFFD))
+    {
+        2
+    } else {
+        1
+    }
+}

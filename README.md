@@ -8,7 +8,7 @@ SuperPower 目前已经具备接近可正常使用的基础能力：
 - 已支持基础 ANSI/CSI/OSC、scrollback、复制粘贴、选区高亮
 - 已支持双击选词、三击选行、基础 Ctrl/Alt 键盘输入
 - 已支持 `alternate screen`、`bracketed paste`、鼠标报告模式
-- 已支持 IME 中文输入提交链路、应用小键盘模式、shell 退出提示
+- 已支持 IME 中文输入提交链路与基础 preedit 可视化、应用小键盘模式、shell 退出提示
 - 已支持配置文件、DPI 响应、系统字体发现与 fallback 链
 
 当前项目在代码层面已经补齐了 P0 的核心兼容路径。剩余主要风险集中在真实 GUI 工作流的手工回归，以及更深层控制序列兼容性打磨。
@@ -38,6 +38,12 @@ SuperPower 目前已经具备接近可正常使用的基础能力：
 - [x] 增加异常场景日志与错误反馈
 - [x] 增加协议与事件层相关测试
 - [ ] 完成 `cmd.exe` / PowerShell / `git` 的回归验证
+
+#### Phase A.4 交互收口
+
+- [x] 实现拖拽选择自动滚动
+- [x] 实现 IME preedit 基础可视化
+- [ ] 根据真实 GUI 工作流继续打磨 preedit 细节
 
 ### P1 - 字体链路深化
 
@@ -86,6 +92,6 @@ SuperPower 目前已经具备接近可正常使用的基础能力：
 ## 当前剩余发布前风险
 
 - 还缺少 `vim / less / fzf / git` 的真实 GUI 手工回归
-- IME 当前重点是 `Commit` 提交链路，未渲染 preedit 预编辑文本
+- IME 当前已具备基础 preedit 可视化，但仍未针对复杂候选/组合输入做细致打磨
 - 更深层的 `CSI / DEC private mode` 仍需要根据真实 TUI trace 持续补齐
 - DirectWrite 仍未进入真实字形光栅化主路径

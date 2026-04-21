@@ -4,7 +4,7 @@ use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use superpower_core::{CellFlags, Color, CursorShape, TerminalHandler};
+use superpower_core::{char_width, CellFlags, Color, CursorShape, TerminalHandler};
 use ttf_parser::{name_id, Face};
 use winit::dpi::PhysicalSize;
 
@@ -41,6 +41,14 @@ struct GlyphInfo {
     bearing_x: i32,
     /// 实际栅格上边距
     bearing_y: i32,
+}
+
+/// 文本布局辅助参数，避免在多个渲染 helper 之间散传标量
+#[derive(Debug, Clone, Copy)]
+struct RenderLayout {
+    screen_size: [f32; 2],
+    cell_size: [f32; 2],
+    padding: [f32; 2],
 }
 
 /// 已加载的单个字体面
@@ -583,7 +591,6 @@ impl Renderer {
         dirty_rows: &[usize],
     ) {
         let font_size = self.scaled_font_size();
-        let atlas_size = 2048u32;
         let visible_lines = terminal.grid.visible_lines();
 
         for &row in dirty_rows {
@@ -594,66 +601,85 @@ impl Renderer {
                 if cell.character == ' ' || cell.character == '\0' {
                     continue;
                 }
-
-                let key = GlyphKey {
-                    character: cell.character,
-                    bold: (cell.flags & CellFlags::BOLD) != CellFlags::EMPTY,
-                    italic: (cell.flags & CellFlags::ITALIC) != CellFlags::EMPTY,
-                    font_index: self.select_font_index(cell.character),
-                };
-
-                if self.glyph_cache.contains_key(&key) {
-                    continue;
-                }
-
-                // 从 fallback 链中选择可覆盖该字符的字体进行光栅化
-                let selected_font = &self.fonts[key.font_index].font;
-                let (metrics, bitmap) = selected_font.rasterize(cell.character, font_size);
-
-                // 计算图集中的位置（简单的行扫描分配）
-                let glyph_count = self.glyph_cache.len() as u32;
-                let glyphs_per_row = atlas_size / (metrics.width as u32 + 1).max(1);
-                let gx = (glyph_count % glyphs_per_row) * (metrics.width as u32 + 1);
-                let gy = (glyph_count / glyphs_per_row) * (metrics.height as u32 + 1);
-
-                if gy + metrics.height as u32 >= atlas_size {
-                    continue; // 图集满了，跳过
-                }
-
-                // 写入纹理
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.glyph_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x: gx, y: gy, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &bitmap,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(metrics.width as u32),
-                        rows_per_image: Some(metrics.height as u32),
-                    },
-                    wgpu::Extent3d {
-                        width: metrics.width as u32,
-                        height: metrics.height as u32,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                self.glyph_cache.insert(
-                    key,
-                    GlyphInfo {
-                        x: gx,
-                        y: gy,
-                        width: metrics.width as u32,
-                        height: metrics.height as u32,
-                        bearing_x: metrics.xmin,
-                        bearing_y: metrics.ymin,
-                    },
+                self.ensure_glyph_cached(
+                    cell.character,
+                    (cell.flags & CellFlags::BOLD) != CellFlags::EMPTY,
+                    (cell.flags & CellFlags::ITALIC) != CellFlags::EMPTY,
+                    font_size,
                 );
             }
         }
+
+        if let Some(preedit) = terminal.ime_preedit() {
+            for ch in preedit.text.chars().filter(|ch| *ch != ' ') {
+                self.ensure_glyph_cached(ch, false, false, font_size);
+            }
+        }
+    }
+
+    /// 确保某个字符对应字形已经进入 atlas
+    fn ensure_glyph_cached(&mut self, character: char, bold: bool, italic: bool, font_size: f32) {
+        if character == '\0' {
+            return;
+        }
+
+        let atlas_size = 2048u32;
+        let key = GlyphKey {
+            character,
+            bold,
+            italic,
+            font_index: self.select_font_index(character),
+        };
+
+        if self.glyph_cache.contains_key(&key) {
+            return;
+        }
+
+        // 从 fallback 链中选择可覆盖该字符的字体进行光栅化
+        let selected_font = &self.fonts[key.font_index].font;
+        let (metrics, bitmap) = selected_font.rasterize(character, font_size);
+
+        // 计算图集中的位置（简单的行扫描分配）
+        let glyph_count = self.glyph_cache.len() as u32;
+        let glyphs_per_row = atlas_size / (metrics.width as u32 + 1).max(1);
+        let gx = (glyph_count % glyphs_per_row) * (metrics.width as u32 + 1);
+        let gy = (glyph_count / glyphs_per_row) * (metrics.height as u32 + 1);
+
+        if gy + metrics.height as u32 >= atlas_size {
+            return;
+        }
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.glyph_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: gx, y: gy, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bitmap,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(metrics.width as u32),
+                rows_per_image: Some(metrics.height as u32),
+            },
+            wgpu::Extent3d {
+                width: metrics.width as u32,
+                height: metrics.height as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.glyph_cache.insert(
+            key,
+            GlyphInfo {
+                x: gx,
+                y: gy,
+                width: metrics.width as u32,
+                height: metrics.height as u32,
+                bearing_x: metrics.xmin,
+                bearing_y: metrics.ymin,
+            },
+        );
     }
 
     fn build_bg_vertices(&self, terminal: &superpower_core::Terminal) -> Vec<BgVertex> {
@@ -665,6 +691,11 @@ impl Renderer {
         let ch = self.cell_height;
         let padding_x = self.effective_padding_x();
         let padding_y = self.effective_padding_y();
+        let layout = RenderLayout {
+            screen_size: [w, h],
+            cell_size: [cw, ch],
+            padding: [padding_x, padding_y],
+        };
 
         for (row_idx, row) in lines.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -690,6 +721,8 @@ impl Renderer {
                 append_bg_quad(&mut vertices, background, [x0, y0, x1, y1], [w, h]);
             }
         }
+
+        self.append_preedit_bg_vertices(&mut vertices, terminal, layout);
         vertices
     }
 
@@ -703,6 +736,11 @@ impl Renderer {
         let atlas_size = 2048.0f32;
         let padding_x = self.effective_padding_x();
         let padding_y = self.effective_padding_y();
+        let layout = RenderLayout {
+            screen_size: [w, h],
+            cell_size: [cw, ch],
+            padding: [padding_x, padding_y],
+        };
 
         for (row_idx, row) in lines.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -780,6 +818,8 @@ impl Renderer {
             }
         }
 
+        self.append_preedit_fg_vertices(&mut vertices, terminal, layout);
+
         vertices
     }
 
@@ -820,6 +860,150 @@ impl Renderer {
             [w, h],
         );
         vertices
+    }
+
+    /// 为 IME preedit 绘制下划线与预编辑光标区域
+    fn append_preedit_bg_vertices(
+        &self,
+        vertices: &mut Vec<BgVertex>,
+        terminal: &superpower_core::Terminal,
+        layout: RenderLayout,
+    ) {
+        let Some(preedit) = terminal.ime_preedit() else {
+            return;
+        };
+
+        let [w, h] = layout.screen_size;
+        let [cw, ch] = layout.cell_size;
+        let [padding_x, padding_y] = layout.padding;
+        let mut visual_col = terminal.cursor.col;
+        let row = terminal.cursor.row;
+        let underline_color = blend_color(self.default_background, self.default_foreground, 0.6);
+        let cursor_color = blend_color(self.default_background, self.default_foreground, 0.85);
+        let cursor_start = preedit.cursor_range.map(|(start, _)| start).unwrap_or(0);
+        let cursor_end = preedit
+            .cursor_range
+            .map(|(_, end)| end)
+            .unwrap_or(cursor_start);
+
+        for (char_index, ch_text) in preedit.text.chars().enumerate() {
+            let width = char_width(ch_text).max(1);
+            let x0 = padding_x + visual_col as f32 * cw;
+            let x1 = x0 + cw * width as f32;
+            let y0 = padding_y + row as f32 * ch;
+            let underline_y0 = y0 + ch - 2.0;
+            let underline_y1 = y0 + ch;
+            append_bg_quad(
+                vertices,
+                underline_color,
+                [x0, underline_y0, x1, underline_y1],
+                [w, h],
+            );
+
+            if char_index >= cursor_start && char_index < cursor_end.max(cursor_start + 1) {
+                append_bg_quad(
+                    vertices,
+                    cursor_color,
+                    [x0, y0, (x0 + 2.0).min(x1), y0 + ch],
+                    [w, h],
+                );
+            }
+
+            visual_col += width;
+        }
+    }
+
+    /// 为 IME preedit 追加前景字形顶点
+    fn append_preedit_fg_vertices(
+        &self,
+        vertices: &mut Vec<FgVertex>,
+        terminal: &superpower_core::Terminal,
+        layout: RenderLayout,
+    ) {
+        let Some(preedit) = terminal.ime_preedit() else {
+            return;
+        };
+
+        let [w, h] = layout.screen_size;
+        let [cw, ch] = layout.cell_size;
+        let [padding_x, padding_y] = layout.padding;
+        let atlas_size = 2048.0f32;
+        let mut visual_col = terminal.cursor.col;
+        let row = terminal.cursor.row;
+        let color = blend_color(self.default_foreground, Color::new(0x6A, 0xC1, 0xFF), 0.2);
+        let r = color.r as f32 / 255.0;
+        let g = color.g as f32 / 255.0;
+        let b = color.b as f32 / 255.0;
+
+        for ch_text in preedit.text.chars() {
+            if ch_text == ' ' {
+                visual_col += 1;
+                continue;
+            }
+
+            let key = GlyphKey {
+                character: ch_text,
+                bold: false,
+                italic: false,
+                font_index: self.select_font_index(ch_text),
+            };
+            let Some(glyph) = self.glyph_cache.get(&key) else {
+                visual_col += char_width(ch_text).max(1);
+                continue;
+            };
+
+            let x0 = padding_x + visual_col as f32 * cw;
+            let y0 = padding_y + row as f32 * ch;
+            let draw_x0 = x0 + glyph.bearing_x as f32;
+            let draw_y0 = y0 + (ch - glyph.height as f32) - glyph.bearing_y as f32;
+            let draw_x1 = draw_x0 + glyph.width as f32;
+            let draw_y1 = draw_y0 + glyph.height as f32;
+
+            let nx0 = draw_x0 / w * 2.0 - 1.0;
+            let ny0 = 1.0 - draw_y0 / h * 2.0;
+            let nx1 = draw_x1 / w * 2.0 - 1.0;
+            let ny1 = 1.0 - draw_y1 / h * 2.0;
+
+            let u0 = glyph.x as f32 / atlas_size;
+            let v0 = glyph.y as f32 / atlas_size;
+            let u1 = (glyph.x + glyph.width) as f32 / atlas_size;
+            let v1 = (glyph.y + glyph.height) as f32 / atlas_size;
+
+            vertices.extend_from_slice(&[
+                FgVertex {
+                    position: [nx0, ny0],
+                    tex_coords: [u0, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny0],
+                    tex_coords: [u1, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx0, ny1],
+                    tex_coords: [u0, v1],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx0, ny1],
+                    tex_coords: [u0, v1],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny0],
+                    tex_coords: [u1, v0],
+                    color: [r, g, b],
+                },
+                FgVertex {
+                    position: [nx1, ny1],
+                    tex_coords: [u1, v1],
+                    color: [r, g, b],
+                },
+            ]);
+
+            visual_col += char_width(ch_text).max(1);
+        }
     }
 }
 

@@ -145,17 +145,19 @@ Terminal
 - 应用光标键模式输入编码
 - 应用小键盘模式输入编码
 - 鼠标拖拽选择
+- 拖拽选择自动滚动
 - 双击选词、三击选行
 - 滚轮滚动 / Shift+PageUp/PageDown/Home/End
 - 鼠标报告模式
 - bracketed paste
 - Ctrl+Shift+C / Ctrl+Shift+V / 右键 / 中键 粘贴
 - IME 提交事件
+- IME preedit 基础可视化
 - DPI 变化响应
 - 配置文件加载
 
 **当前不足：**
-- IME preedit 未渲染
+- IME preedit 的复杂候选 / 组合输入细节仍需继续打磨
 - 更深层鼠标模式 / 私有模式仍需持续打磨
 
 ---
@@ -169,7 +171,7 @@ Terminal
 - `vim` / `less` / `fzf` / `git` 等真实工作流的 GUI 手工回归
 
 ### 2. 输入法与复杂输入
-- IME preedit 预编辑显示
+- IME preedit 的复杂输入场景打磨
 - 更多修饰键组合与国际键盘布局回归
 
 ### 3. 字体与渲染质量
@@ -222,8 +224,8 @@ Terminal
 
 ### Phase A — 达到“可正常使用终端”
 
-- 已完成：alternate screen / 鼠标报告 / bracketed paste / IME 提交链路 / shell 退出提示
-- 待继续打磨：更完整的 DEC / CSI 覆盖、IME preedit、真实工作流回归
+- 已完成：alternate screen / 鼠标报告 / bracketed paste / IME 提交链路 / preedit 基础可视化 / shell 退出提示
+- 待继续打磨：更完整的 DEC / CSI 覆盖、IME 复杂场景、真实工作流回归
 
 ### Phase B — 字体链路深化
 
