@@ -70,6 +70,10 @@ pub struct Terminal {
     private_modes: std::collections::HashSet<u16>,
     /// 应用光标键模式
     application_cursor_keys: bool,
+    /// 自动换行模式
+    auto_wrap_mode: bool,
+    /// 原点模式（相对滚动区域）
+    origin_mode: bool,
     /// 鼠标跟踪模式
     mouse_tracking_mode: MouseTrackingMode,
     /// 是否启用 SGR 扩展鼠标编码（1006）
@@ -86,6 +90,8 @@ pub struct Terminal {
     alternate_saved_cursor: Cursor,
     /// IME 预编辑状态
     ime_preedit: Option<ImePreedit>,
+    /// 待写回 PTY 的响应字节
+    pending_output: Vec<u8>,
     /// 窗口标题
     pub title: String,
     /// 当前选区
@@ -177,6 +183,8 @@ impl Terminal {
             modes: std::collections::HashSet::new(),
             private_modes: std::collections::HashSet::new(),
             application_cursor_keys: false,
+            auto_wrap_mode: true,
+            origin_mode: false,
             mouse_tracking_mode: MouseTrackingMode::Disabled,
             mouse_sgr_mode: false,
             bracketed_paste_mode: false,
@@ -191,6 +199,7 @@ impl Terminal {
             alternate_cursor: Cursor::new(),
             alternate_saved_cursor: Cursor::new(),
             ime_preedit: None,
+            pending_output: Vec::new(),
             title: String::new(),
             selection: None,
         };
@@ -220,6 +229,16 @@ impl Terminal {
 
     fn mark_dirty(&mut self, row: usize) {
         self.damage.mark_row(row);
+    }
+
+    /// 向 PTY 写入终端响应数据
+    fn queue_output(&mut self, bytes: &[u8]) {
+        self.pending_output.extend_from_slice(bytes);
+    }
+
+    /// 取出待写回 PTY 的输出数据
+    pub fn take_pending_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_output)
     }
 
     /// 保存光标位置
@@ -298,6 +317,14 @@ impl Terminal {
         match mode {
             // DECCKM - 应用光标键模式
             1 => self.application_cursor_keys = true,
+            // DECOM - 原点模式
+            6 => {
+                self.origin_mode = true;
+                self.cursor.row = self.grid.scroll_top();
+                self.cursor.col = 0;
+            }
+            // DECAWM - 自动换行
+            7 => self.auto_wrap_mode = true,
             // DECTCEM - 显示光标
             25 => self.cursor.visible = true,
             // DECNKM - 应用小键盘模式
@@ -332,6 +359,14 @@ impl Terminal {
         match mode {
             // DECCKM - 普通光标键模式
             1 => self.application_cursor_keys = false,
+            // DECOM - 绝对坐标
+            6 => {
+                self.origin_mode = false;
+                self.cursor.row = 0;
+                self.cursor.col = 0;
+            }
+            // DECAWM - 关闭自动换行
+            7 => self.auto_wrap_mode = false,
             // DECTCEM - 隐藏光标
             25 => self.cursor.visible = false,
             // DECNKM - 普通小键盘模式
@@ -444,9 +479,18 @@ impl Terminal {
         let col = self.cursor.col;
 
         if col >= self.grid.cols() {
+            if !self.auto_wrap_mode {
+                self.cursor.col = self.grid.cols().saturating_sub(1);
+            } else {
+                // 自动换行
+                self.cursor.col = 0;
+                self.newline();
+            }
+        }
+
+        if self.cursor.col >= self.grid.cols() {
             // 自动换行
-            self.cursor.col = 0;
-            self.newline();
+            self.cursor.col = self.grid.cols().saturating_sub(1);
         }
 
         let row = self.cursor.row;
@@ -634,6 +678,13 @@ impl vte::Perform for Terminal {
             .collect();
 
         match action {
+            // Insert Blank Characters
+            '@' => {
+                let n = param_or(&p, 0, 1).max(1) as usize;
+                self.grid
+                    .insert_blank_cells(self.cursor.row, self.cursor.col, n);
+                self.mark_dirty(self.cursor.row);
+            }
             // Cursor Up
             'A' => {
                 let n = param_or(&p, 0, 1).max(1) as usize;
@@ -676,7 +727,11 @@ impl vte::Perform for Terminal {
             'H' | 'f' => {
                 let row = param_or(&p, 0, 1).max(1) as usize - 1;
                 let col = param_or(&p, 1, 1).max(1) as usize - 1;
-                self.cursor.row = row.min(self.grid.rows() - 1);
+                self.cursor.row = if self.origin_mode {
+                    (self.grid.scroll_top() + row).min(self.grid.scroll_bottom())
+                } else {
+                    row.min(self.grid.rows() - 1)
+                };
                 self.cursor.col = col.min(self.grid.cols() - 1);
                 self.mark_dirty(self.cursor.row);
             }
@@ -722,6 +777,12 @@ impl vte::Perform for Terminal {
                 }
                 self.damage.mark_full_redraw();
             }
+            // Delete Characters
+            'P' => {
+                let n = param_or(&p, 0, 1).max(1) as usize;
+                self.grid.delete_cells(self.cursor.row, self.cursor.col, n);
+                self.mark_dirty(self.cursor.row);
+            }
             // Set Scrolling Region (DECSTBM)
             'r' => {
                 let top = param_or(&p, 0, 1) as usize;
@@ -737,6 +798,28 @@ impl vte::Perform for Terminal {
                 self.cursor.col = 0;
                 self.damage.mark_full_redraw();
             }
+            // Scroll Up
+            'S' => {
+                let n = param_or(&p, 0, 1).max(1);
+                for _ in 0..n {
+                    self.grid.scroll_up();
+                }
+                self.damage.mark_full_redraw();
+            }
+            // Scroll Down
+            'T' => {
+                let n = param_or(&p, 0, 1).max(1);
+                for _ in 0..n {
+                    self.grid.scroll_down();
+                }
+                self.damage.mark_full_redraw();
+            }
+            // Erase Characters
+            'X' => {
+                let n = param_or(&p, 0, 1).max(1) as usize;
+                self.grid.erase_chars(self.cursor.row, self.cursor.col, n);
+                self.mark_dirty(self.cursor.row);
+            }
             // Save Cursor Position (DECSC)
             's' => {
                 self.save_cursor();
@@ -744,6 +827,29 @@ impl vte::Perform for Terminal {
             // Restore Cursor Position (DECRC)
             'u' => {
                 self.restore_cursor();
+            }
+            // Device Status Report / Cursor Position Report
+            'n' if intermediates == [b'?'] => {
+                if let Some(&mode) = p.first() {
+                    if mode == 6 {
+                        let row = self.cursor.row + 1;
+                        let col = self.cursor.col + 1;
+                        self.queue_output(format!("\x1b[?{};{}R", row, col).as_bytes());
+                    }
+                }
+            }
+            'n' => {
+                if let Some(&mode) = p.first() {
+                    match mode {
+                        5 => self.queue_output(b"\x1b[0n"),
+                        6 => {
+                            let row = self.cursor.row + 1;
+                            let col = self.cursor.col + 1;
+                            self.queue_output(format!("\x1b[{};{}R", row, col).as_bytes());
+                        }
+                        _ => {}
+                    }
+                }
             }
             // SGR - Select Graphic Rendition
             'm' => {
@@ -786,9 +892,43 @@ impl vte::Perform for Terminal {
                     };
                 }
             }
+            // Device Attributes
+            'c' if intermediates == [b'>'] => {
+                self.queue_output(b"\x1b[>0;10;1c");
+            }
+            'c' => {
+                self.queue_output(b"\x1b[?1;2c");
+            }
             _ => {
                 tracing::trace!("Unhandled CSI: {:?} {}", p, action);
             }
+        }
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+        match byte {
+            b'7' => self.save_cursor(),
+            b'8' => self.restore_cursor(),
+            b'=' => self.cursor.app_mode = true,
+            b'>' => self.cursor.app_mode = false,
+            // IND
+            b'D' => self.newline(),
+            // NEL
+            b'E' => {
+                self.newline();
+                self.carriage_return();
+            }
+            // RI
+            b'M' => {
+                if self.cursor.row == self.grid.scroll_top() {
+                    self.grid.scroll_down();
+                    self.damage.mark_full_redraw();
+                } else {
+                    self.cursor.row = self.cursor.row.saturating_sub(1);
+                    self.mark_dirty(self.cursor.row);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -950,5 +1090,38 @@ mod tests {
 
         handler.terminal.clear_ime_preedit();
         assert!(handler.terminal.ime_preedit().is_none());
+    }
+
+    #[test]
+    fn test_device_status_report_response() {
+        let mut handler = TerminalHandler::new(24, 80, 1000);
+        handler.process(b"\x1b[6n");
+        assert_eq!(handler.terminal.take_pending_output(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn test_device_attributes_responses() {
+        let mut handler = TerminalHandler::new(24, 80, 1000);
+        handler.process(b"\x1b[c");
+        assert_eq!(handler.terminal.take_pending_output(), b"\x1b[?1;2c");
+
+        handler.process(b"\x1b[>c");
+        assert_eq!(handler.terminal.take_pending_output(), b"\x1b[>0;10;1c");
+    }
+
+    #[test]
+    fn test_insert_delete_and_erase_chars() {
+        let mut handler = TerminalHandler::new(4, 8, 1000);
+        handler.process(b"abcd");
+        handler.process(b"\x1b[1;2H\x1b[@");
+        assert_eq!(handler.terminal.grid.cell(0, 0).unwrap().character, 'a');
+        assert_eq!(handler.terminal.grid.cell(0, 1).unwrap().character, ' ');
+        assert_eq!(handler.terminal.grid.cell(0, 2).unwrap().character, 'b');
+
+        handler.process(b"\x1b[1;3H\x1b[P");
+        assert_eq!(handler.terminal.grid.cell(0, 2).unwrap().character, 'c');
+
+        handler.process(b"\x1b[1;2H\x1b[X");
+        assert_eq!(handler.terminal.grid.cell(0, 1).unwrap().character, ' ');
     }
 }

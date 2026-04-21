@@ -227,6 +227,58 @@ impl Grid {
         }
     }
 
+    /// 在指定位置插入空白 Cell，并将右侧内容右移
+    pub fn insert_blank_cells(&mut self, row: usize, col: usize, count: usize) {
+        let Some(line) = self.lines.get_mut(row) else {
+            return;
+        };
+        if col >= line.len() || count == 0 {
+            return;
+        }
+
+        let count = count.min(line.len() - col);
+        for idx in (col..line.len() - count).rev() {
+            line[idx + count] = line[idx].clone();
+        }
+        for cell in &mut line[col..col + count] {
+            *cell = self.template_cell.clone();
+        }
+    }
+
+    /// 删除指定位置开始的 Cell，并将右侧内容左移
+    pub fn delete_cells(&mut self, row: usize, col: usize, count: usize) {
+        let Some(line) = self.lines.get_mut(row) else {
+            return;
+        };
+        if col >= line.len() || count == 0 {
+            return;
+        }
+
+        let count = count.min(line.len() - col);
+        for idx in col + count..line.len() {
+            line[idx - count] = line[idx].clone();
+        }
+        let tail_start = line.len() - count;
+        for cell in &mut line[tail_start..] {
+            *cell = self.template_cell.clone();
+        }
+    }
+
+    /// 使用空白 Cell 擦除指定数量字符，但不移动后续内容
+    pub fn erase_chars(&mut self, row: usize, col: usize, count: usize) {
+        let Some(line) = self.lines.get_mut(row) else {
+            return;
+        };
+        if col >= line.len() || count == 0 {
+            return;
+        }
+
+        let end = (col + count).min(line.len());
+        for cell in &mut line[col..end] {
+            *cell = self.template_cell.clone();
+        }
+    }
+
     /// 清除从行首到 (row, col)
     pub fn clear_left(&mut self, row: usize, col: usize) {
         if let Some(r) = self.lines.get_mut(row) {

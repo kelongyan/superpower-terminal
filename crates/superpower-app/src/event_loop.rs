@@ -206,6 +206,19 @@ impl App {
         }
     }
 
+    /// 直接向 PTY 写入原始响应数据，不改变本地视口或重绘状态
+    fn write_pty_raw(&mut self, bytes: &[u8]) {
+        if self.shell_exited || bytes.is_empty() {
+            return;
+        }
+
+        if let Some(pty) = &mut self.pty {
+            if let Err(err) = pty.write(bytes) {
+                tracing::warn!("Failed to write raw PTY bytes: {}", err);
+            }
+        }
+    }
+
     /// 处理 shell 退出后的状态与提示
     fn handle_shell_exit(&mut self, code: i32) {
         if self.shell_exited {
@@ -279,7 +292,7 @@ impl App {
         );
 
         if let Some(bytes) = encoded {
-            self.write_input(&bytes);
+            self.write_pty_raw(&bytes);
         }
 
         match kind {
@@ -484,11 +497,15 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let mut exit_code = None;
+                let mut pending_output = Vec::new();
                 if let (Some(pty), Some(terminal)) = (&mut self.pty, &mut self.terminal) {
                     while let Ok(event) = pty.rx.try_recv() {
                         match event {
                             PtyEvent::Data(data) => {
                                 terminal.process(&data);
+                                pending_output.extend_from_slice(
+                                    terminal.terminal.take_pending_output().as_slice(),
+                                );
                             }
                             PtyEvent::Exit(code) => {
                                 tracing::info!("Shell exited");
@@ -500,6 +517,10 @@ impl ApplicationHandler for App {
 
                 if let Some(code) = exit_code {
                     self.handle_shell_exit(code);
+                }
+
+                if !pending_output.is_empty() {
+                    self.write_pty_raw(&pending_output);
                 }
 
                 if let (Some(renderer), Some(terminal)) = (&mut self.renderer, &mut self.terminal) {
