@@ -56,8 +56,12 @@ struct RenderLayout {
 struct LoadedFont {
     /// 对外展示的字体名
     name: String,
+    /// 字体族提示名，用于重建 DirectWrite rasterizer
+    family_hint: String,
     /// 字体在 fallback 链中的顺序
     font: fontdue::Font,
+    /// DirectWrite rasterizer；不可用时保持为空并回退到 fontdue
+    dw_rasterizer: Option<DwRasterizer>,
 }
 
 /// 渲染器初始化参数
@@ -87,12 +91,15 @@ pub struct Renderer {
     glyph_bind_group: wgpu::BindGroup,
     // 字形缓存
     glyph_cache: HashMap<GlyphKey, GlyphInfo>,
+    // atlas 分配状态
+    atlas_size: u32,
+    atlas_cursor_x: u32,
+    atlas_cursor_y: u32,
+    atlas_row_height: u32,
     // 字体光栅化链
     fonts: Vec<LoadedFont>,
     font_size: f32,
-    font_family: String,
     font_backend: FontBackend,
-    dw_rasterizer: Option<DwRasterizer>,
     default_foreground: Color,
     default_background: Color,
     padding_x: u32,
@@ -341,12 +348,10 @@ impl Renderer {
             ],
         });
 
-        let scaled_font_size = (options.font_size as f64 * scale_factor) as f32;
-        let dw_rasterizer = DwRasterizer::new(&options.font_family, scaled_font_size)
-            .expect("Failed to initialize font rasterizer");
-
         // 构建字体链：优先用户配置字体，再加载常见 Windows fallback，最后退回内嵌字体。
-        let fonts = build_font_chain(&options.font_family).expect("Failed to build font chain");
+        let scaled_font_size = (options.font_size as f64 * scale_factor) as f32;
+        let fonts = build_font_chain(&options.font_family, scaled_font_size)
+            .expect("Failed to build font chain");
         tracing::info!(
             "Renderer font chain: {}",
             fonts
@@ -356,18 +361,24 @@ impl Renderer {
                 .join(" -> ")
         );
 
-        let (cell_width, cell_height) = if dw_rasterizer.is_initialized() {
-            (dw_rasterizer.cell_width(), dw_rasterizer.cell_height())
-        } else {
-            let primary_font = &fonts[0].font;
-            let metrics = primary_font
-                .horizontal_line_metrics(scaled_font_size)
-                .unwrap();
-            (
-                primary_font.rasterize('M', scaled_font_size).0.width as f32,
-                metrics.new_line_size,
-            )
-        };
+        let primary_dw_metrics = fonts.first().and_then(|font| {
+            font.dw_rasterizer
+                .as_ref()
+                .map(|dw| (dw.cell_width(), dw.cell_height(), dw.metrics().source))
+        });
+        let (cell_width, cell_height) =
+            if let Some((cell_width, cell_height, _)) = primary_dw_metrics {
+                (cell_width, cell_height)
+            } else {
+                let primary_font = &fonts[0].font;
+                let metrics = primary_font
+                    .horizontal_line_metrics(scaled_font_size)
+                    .unwrap();
+                (
+                    primary_font.rasterize('M', scaled_font_size).0.width as f32,
+                    metrics.new_line_size,
+                )
+            };
 
         Self {
             device,
@@ -381,11 +392,15 @@ impl Renderer {
             glyph_texture,
             glyph_bind_group,
             glyph_cache: HashMap::new(),
+            atlas_size,
+            atlas_cursor_x: 0,
+            atlas_cursor_y: 0,
+            atlas_row_height: 0,
             fonts,
             font_size: options.font_size,
-            font_family: options.font_family,
-            font_backend: dw_rasterizer.metrics().source,
-            dw_rasterizer: dw_rasterizer.is_initialized().then_some(dw_rasterizer),
+            font_backend: primary_dw_metrics
+                .map(|(_, _, source)| source)
+                .unwrap_or(FontBackend::FontdueFallback),
             default_foreground: options.default_foreground,
             default_background: options.default_background,
             padding_x: options.padding_x,
@@ -438,35 +453,86 @@ impl Renderer {
         &self.fonts[0].font
     }
 
+    /// 获取主 DirectWrite rasterizer
+    fn primary_dw_rasterizer(&self) -> Option<&DwRasterizer> {
+        self.fonts
+            .first()
+            .and_then(|font| font.dw_rasterizer.as_ref())
+    }
+
+    /// 重新创建字体链中各字体对应的 DirectWrite rasterizer
+    fn refresh_directwrite_rasterizers(&mut self, font_size: f32) {
+        for font in &mut self.fonts {
+            font.dw_rasterizer = DwRasterizer::new(&font.family_hint, font_size)
+                .ok()
+                .filter(|dw| dw.is_initialized());
+        }
+    }
+
     /// 为字符选择最合适的字体索引，优先使用链路前面的字体
     fn select_font_index(&self, character: char) -> usize {
         self.fonts
             .iter()
-            .position(|font| font.font.has_glyph(character))
+            .enumerate()
+            .filter(|(_, font)| font.font.has_glyph(character))
+            .min_by_key(|(_, font)| font_preference_score(character, font))
+            .map(|(index, _)| index)
             .unwrap_or(0)
+    }
+
+    /// 重置 atlas 分配器状态
+    fn reset_atlas_allocator(&mut self) {
+        self.atlas_cursor_x = 0;
+        self.atlas_cursor_y = 0;
+        self.atlas_row_height = 0;
+    }
+
+    /// 用 shelf 策略在 atlas 中分配空间，减少长期运行下的浪费
+    fn allocate_atlas_region(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 || width > self.atlas_size || height > self.atlas_size {
+            return None;
+        }
+
+        let padding = 1;
+        if self.atlas_cursor_x + width + padding > self.atlas_size {
+            self.atlas_cursor_x = 0;
+            self.atlas_cursor_y = self
+                .atlas_cursor_y
+                .saturating_add(self.atlas_row_height + padding);
+            self.atlas_row_height = 0;
+        }
+
+        if self.atlas_cursor_y + height + padding > self.atlas_size {
+            return None;
+        }
+
+        let origin = (self.atlas_cursor_x, self.atlas_cursor_y);
+        self.atlas_cursor_x = self.atlas_cursor_x.saturating_add(width + padding);
+        self.atlas_row_height = self.atlas_row_height.max(height);
+        Some(origin)
     }
 
     pub fn update_font_metrics(&mut self, scale_factor: f64) {
         self.scale_factor = scale_factor.max(1.0);
         let scaled_font_size = self.scaled_font_size();
-        if let Ok(dw_rasterizer) = DwRasterizer::new(&self.font_family, scaled_font_size) {
-            if dw_rasterizer.is_initialized() {
-                self.cell_width = dw_rasterizer.cell_width();
-                self.cell_height = dw_rasterizer.cell_height();
-                self.font_backend = dw_rasterizer.metrics().source;
-                self.dw_rasterizer = Some(dw_rasterizer);
-            } else if let Some(metrics) = self
-                .primary_font()
-                .horizontal_line_metrics(scaled_font_size)
-            {
-                self.cell_width =
-                    self.primary_font().rasterize('M', scaled_font_size).0.width as f32;
-                self.cell_height = metrics.new_line_size;
-                self.font_backend = FontBackend::FontdueFallback;
-                self.dw_rasterizer = None;
-            }
+        self.refresh_directwrite_rasterizers(scaled_font_size);
+        if let Some((cell_width, cell_height, source)) = self
+            .primary_dw_rasterizer()
+            .map(|dw| (dw.cell_width(), dw.cell_height(), dw.metrics().source))
+        {
+            self.cell_width = cell_width;
+            self.cell_height = cell_height;
+            self.font_backend = source;
+        } else if let Some(metrics) = self
+            .primary_font()
+            .horizontal_line_metrics(scaled_font_size)
+        {
+            self.cell_width = self.primary_font().rasterize('M', scaled_font_size).0.width as f32;
+            self.cell_height = metrics.new_line_size;
+            self.font_backend = FontBackend::FontdueFallback;
         }
         self.glyph_cache.clear();
+        self.reset_atlas_allocator();
     }
 
     pub fn needs_render(&self, handler: &TerminalHandler) -> bool {
@@ -627,7 +693,6 @@ impl Renderer {
             return;
         }
 
-        let atlas_size = 2048u32;
         let key = GlyphKey {
             character,
             bold,
@@ -640,9 +705,10 @@ impl Renderer {
         }
 
         let directwrite_glyph = self
-            .dw_rasterizer
-            .as_ref()
-            .filter(|dw| key.font_index == 0 && dw.has_glyph(character))
+            .fonts
+            .get(key.font_index)
+            .and_then(|font| font.dw_rasterizer.as_ref())
+            .filter(|dw| dw.has_glyph(character))
             .and_then(|dw| dw.rasterize(character));
 
         let (width, height, offset_x, offset_y, bitmap) = if let Some(glyph) = directwrite_glyph {
@@ -670,15 +736,9 @@ impl Renderer {
             return;
         }
 
-        // 计算图集中的位置（简单的行扫描分配）
-        let glyph_count = self.glyph_cache.len() as u32;
-        let glyphs_per_row = atlas_size / (width + 1).max(1);
-        let gx = (glyph_count % glyphs_per_row) * (width + 1);
-        let gy = (glyph_count / glyphs_per_row) * (height + 1);
-
-        if gy + height >= atlas_size {
+        let Some((gx, gy)) = self.allocate_atlas_region(width, height) else {
             return;
-        }
+        };
 
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -1058,7 +1118,7 @@ const WINDOWS_FALLBACK_FAMILIES: &[&str] = &[
 ];
 
 /// 构建字体链，优先使用用户指定字体，再补入常见系统 fallback，最后追加内嵌字体
-fn build_font_chain(requested_family: &str) -> Result<Vec<LoadedFont>, String> {
+fn build_font_chain(requested_family: &str, font_size: f32) -> Result<Vec<LoadedFont>, String> {
     let mut chain = Vec::new();
     let mut seen_faces = HashSet::new();
     let system_faces = scan_system_font_faces();
@@ -1067,7 +1127,7 @@ fn build_font_chain(requested_family: &str) -> Result<Vec<LoadedFont>, String> {
     {
         if let Some(face) = find_system_font_face(&system_faces, family) {
             if seen_faces.insert((face.path.clone(), face.collection_index)) {
-                if let Ok(font) = load_system_font_face(face) {
+                if let Ok(font) = load_system_font_face(face, font_size) {
                     chain.push(font);
                 }
             }
@@ -1075,7 +1135,7 @@ fn build_font_chain(requested_family: &str) -> Result<Vec<LoadedFont>, String> {
     }
 
     // 任何情况下都保留项目自带字体作为最后兜底，避免系统字体发现失败导致不可渲染。
-    chain.push(load_embedded_font()?);
+    chain.push(load_embedded_font(font_size)?);
 
     if chain.is_empty() {
         Err("No usable font in chain".to_string())
@@ -1137,8 +1197,8 @@ fn find_system_font_face<'a>(
     })
 }
 
-/// 从系统字体文件加载一个可用于 fontdue 的字体面
-fn load_system_font_face(face: &SystemFontFace) -> Result<LoadedFont, String> {
+/// 从系统字体文件加载一个可用于 fontdue / DirectWrite 的字体面
+fn load_system_font_face(face: &SystemFontFace, font_size: f32) -> Result<LoadedFont, String> {
     let bytes =
         fs::read(&face.path).map_err(|err| format!("Failed to read {:?}: {}", face.path, err))?;
     let font = fontdue::Font::from_bytes(
@@ -1149,6 +1209,14 @@ fn load_system_font_face(face: &SystemFontFace) -> Result<LoadedFont, String> {
         },
     )
     .map_err(|err| format!("Failed to parse {:?}: {}", face.path, err))?;
+    let family_hint = face
+        .family_names
+        .first()
+        .cloned()
+        .unwrap_or_else(|| face.path.display().to_string());
+    let dw_rasterizer = DwRasterizer::new(&family_hint, font_size)
+        .ok()
+        .filter(|dw| dw.is_initialized());
 
     Ok(LoadedFont {
         name: font
@@ -1156,22 +1224,30 @@ fn load_system_font_face(face: &SystemFontFace) -> Result<LoadedFont, String> {
             .map(ToOwned::to_owned)
             .or_else(|| face.family_names.first().cloned())
             .unwrap_or_else(|| face.path.display().to_string()),
+        family_hint,
         font,
+        dw_rasterizer,
     })
 }
 
 /// 加载内嵌字体，作为最后的硬兜底
-fn load_embedded_font() -> Result<LoadedFont, String> {
+fn load_embedded_font(font_size: f32) -> Result<LoadedFont, String> {
     let font_data = include_bytes!("../../../assets/CascadiaCode-Regular.ttf");
     let font = fontdue::Font::from_bytes(font_data.as_slice(), fontdue::FontSettings::default())
         .map_err(|err| format!("Failed to load embedded font: {}", err))?;
+    let family_hint = font
+        .name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "Embedded Cascadia Code".to_string());
+    let dw_rasterizer = DwRasterizer::new(&family_hint, font_size)
+        .ok()
+        .filter(|dw| dw.is_initialized());
 
     Ok(LoadedFont {
-        name: font
-            .name()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "Embedded Cascadia Code".to_string()),
+        name: family_hint.clone(),
+        family_hint,
         font,
+        dw_rasterizer,
     })
 }
 
@@ -1223,6 +1299,64 @@ fn normalize_font_name(name: &str) -> String {
         .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '_')
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// 根据字符类型与字体族名给 fallback 选择打分，分值越小优先级越高
+fn font_preference_score(character: char, font: &LoadedFont) -> i32 {
+    let family = normalize_font_name(&font.family_hint);
+
+    if is_emoji_like(character) {
+        if family.contains("segoeuiemoji") {
+            return 0;
+        }
+        if family.contains("segoeuisymbol") {
+            return 1;
+        }
+        return 10;
+    }
+
+    if is_cjk_like(character) {
+        if family.contains("microsoftyaheiui") {
+            return 0;
+        }
+        if family.contains("microsoftyahei") {
+            return 1;
+        }
+        if family.contains("simsun") {
+            return 2;
+        }
+        return 10;
+    }
+
+    if family.contains("cascadiacode") || family.contains("consolas") {
+        return 0;
+    }
+
+    10
+}
+
+/// 判断字符是否更接近 emoji / 符号字体
+fn is_emoji_like(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1F300..=0x1FAFF | 0x2600..=0x27BF
+    )
+}
+
+/// 判断字符是否更接近中日韩宽字符
+fn is_cjk_like(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x115F
+            | 0x2E80..=0x303F
+            | 0x3040..=0x30FF
+            | 0x3400..=0x9FFF
+            | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF01..=0xFF60
+            | 0xFFE0..=0xFFE6
+    )
 }
 
 /// 追加一个背景矩形的两个三角形顶点
@@ -1286,6 +1420,15 @@ fn blend_color(base: Color, overlay: Color, alpha: f32) -> Color {
 mod tests {
     use super::*;
 
+    fn dummy_font(name: &str) -> LoadedFont {
+        LoadedFont {
+            name: name.to_string(),
+            family_hint: name.to_string(),
+            font: load_embedded_font(14.0).unwrap().font,
+            dw_rasterizer: None,
+        }
+    }
+
     /// 验证字体名归一化不会被空格和连接符影响
     #[test]
     fn normalize_font_name_ignores_spacing_and_case() {
@@ -1296,8 +1439,16 @@ mod tests {
     /// 验证内嵌字体兜底始终可加载
     #[test]
     fn embedded_font_can_be_loaded() {
-        let font = load_embedded_font().expect("embedded font should load");
+        let font = load_embedded_font(14.0).expect("embedded font should load");
         assert!(font.font.has_glyph('A'));
+    }
+
+    /// 验证 CJK 字符会优先命中更适合的中文字体族
+    #[test]
+    fn cjk_font_preference_prefers_chinese_families() {
+        let yahei = dummy_font("Microsoft YaHei");
+        let cascadia = dummy_font("Cascadia Code");
+        assert!(font_preference_score('你', &yahei) < font_preference_score('你', &cascadia));
     }
 }
 

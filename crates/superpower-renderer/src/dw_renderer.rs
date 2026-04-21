@@ -46,6 +46,7 @@ pub enum FontBackend {
 }
 
 /// DirectWrite 字体光栅化器
+#[derive(Debug)]
 pub struct DwRasterizer {
     factory: Option<IDWriteFactory>,
     font_face: Option<IDWriteFontFace>,

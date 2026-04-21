@@ -50,20 +50,20 @@ SuperPower 目前已经具备接近可正常使用的基础能力：
 #### Phase B.1 DirectWrite 深化接入
 
 - [x] 将 DirectWrite 从“度量”推进到“主字体单字形光栅化”
-- [ ] 保持 `fontdue` 作为 fallback，避免一次性切换风险
-- [ ] 校验 atlas 结构与 DirectWrite 输出的兼容性
+- [x] 保持 `fontdue` 作为 fallback，避免一次性切换风险
+- [x] 校验 atlas 结构与 DirectWrite 输出的兼容性
 - [ ] 为字体加载、fallback 失败场景补齐日志
 
 #### Phase B.2 CJK 与 fallback 提升
 
-- [ ] 提升中日韩字符显示质量
+- [x] 提升中日韩字符显示质量
 - [ ] 优化宽字符定位与边界处理
-- [ ] 提升系统字体 fallback 命中率与稳定性
+- [x] 提升系统字体 fallback 命中率与稳定性
 - [ ] 为复杂文本场景补充回归样例
 
 #### Phase B.3 渲染质量优化
 
-- [ ] 优化 atlas 放置策略，减少行扫描浪费
+- [x] 优化 atlas 放置策略，减少行扫描浪费
 - [ ] 评估大量输出下的 cache / atlas 退化问题
 - [ ] 增加长时间运行和高频刷屏的性能验证
 
@@ -94,4 +94,4 @@ SuperPower 目前已经具备接近可正常使用的基础能力：
 - 还缺少 `vim / less / fzf / git` 的真实 GUI 手工回归
 - IME 当前已具备基础 preedit 可视化，但仍未针对复杂候选/组合输入做细致打磨
 - 更深层的 `CSI / DEC private mode` 仍需要根据真实 TUI trace 持续补齐
-- DirectWrite 已进入主字体单字形光栅化路径，但 fallback 链仍以 `fontdue` 为主
+- DirectWrite 已扩展到更多字体场景，但 fallback 链仍保留 `fontdue` 兜底
