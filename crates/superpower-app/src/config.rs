@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// 终端配置
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
     pub shell: ShellConfig,
@@ -16,9 +16,11 @@ pub struct Config {
     pub colors: ColorsConfig,
     #[serde(default)]
     pub shortcuts: HashMap<String, String>,
+    #[serde(default)]
+    pub profiles: Vec<crate::profile::Profile>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ShellConfig {
     #[serde(default = "default_shell_program")]
     pub program: String,
@@ -39,7 +41,7 @@ impl Default for ShellConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FontConfig {
     #[serde(default = "default_font_family")]
     pub family: String,
@@ -64,7 +66,7 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct WindowConfig {
     #[serde(default = "default_window_width")]
     pub width: u32,
@@ -97,7 +99,7 @@ impl Default for WindowConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ScrollbackConfig {
     #[serde(default = "default_scrollback_limit")]
     pub limit: usize,
@@ -115,7 +117,7 @@ impl Default for ScrollbackConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ColorsConfig {
     #[serde(default = "default_fg")]
     pub foreground: String,
