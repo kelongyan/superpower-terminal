@@ -1,112 +1,61 @@
-# superpower-terminal
+# SuperPower Terminal
+
+Windows 本地终端模拟器，基于 Rust + wgpu + ConPTY。
+
+## 构建与运行
+
+需要 Rust 工具链（`cargo`）。
+
+```powershell
+cargo run -p superpower-app
+```
+
+Release 构建：
+
+```powershell
+cargo build --release
+```
 
 ## 当前状态
 
-SuperPower 目前已经具备接近可正常使用的基础能力：
+已具备基础可用能力：
 
-- 已打通 `PTY -> 解析器 -> Grid -> 渲染器 -> 窗口` 主链路
-- 已支持基础 ANSI/CSI/OSC、scrollback、复制粘贴、选区高亮
-- 已支持双击选词、三击选行、基础 Ctrl/Alt 键盘输入
-- 已支持 `alternate screen`、`bracketed paste`、鼠标报告模式
-- 已支持 IME 中文输入提交链路与基础 preedit 可视化、应用小键盘模式、shell 退出提示
-- 已支持配置文件、DPI 响应、系统字体发现与 fallback 链
-- 已补齐第一版桌面 UI 壳：工具栏、标签栏、设置面板、状态栏、多标签页与主题切换
-- 已支持运行时字号调节，以及设置面板中的复制 / 粘贴 / 清屏 / 回到底部操作
+- 支持 `cmd.exe` / PowerShell 的基础命令行工作流
+- 支持 `vim` / `less` / `fzf` 等全屏 TUI 的核心协议路径（alternate screen、鼠标报告、bracketed paste）
+- 支持 scrollback、选区高亮、双击选词、三击选行、复制粘贴
+- 支持 IME 中文输入与基础 preedit 可视化
+- 支持多标签页、主题切换、工具栏与设置面板
+- 支持运行时字号调节与 DPI 响应
+- 支持系统字体发现与 fallback 链
 
-当前项目在代码层面已经补齐了 P0 的核心兼容路径。剩余主要风险集中在真实 GUI 工作流的手工回归，以及更深层控制序列兼容性打磨。
+## 技术栈
 
-## 当前桌面 UI 能力
+| 层级 | 技术 |
+|------|------|
+| 终端解析 | `vte` |
+| PTY | `portable-pty` (ConPTY) |
+| 渲染 | `wgpu` + `fontdue` atlas + DirectWrite |
+| 字体发现 | `ttf-parser` + Windows 系统字体扫描 |
+| 窗口 | `winit` |
+| 配置 | TOML + `serde` |
+| 剪贴板 | `arboard` |
 
-`cargo run -p superpower-app` 启动后，当前版本已经不再是“只有一块灰色终端画布”的状态，而是具备了第一版产品化桌面壳：
+## Workspace 结构
 
-- 顶部工具栏：支持新建标签页、主题循环切换、设置面板开关
-- 标签栏：支持多终端标签页的创建、切换、关闭，并同步 shell 标题
-- 主内容区：终端内容区与右侧设置面板分离，避免 UI 区域误触发终端选择
-- 设置面板：支持显式主题切换、字号调节，以及复制 / 粘贴 / 清屏 / 回到底部
-- 底部状态栏：显示 shell、终端行列尺寸、滚动状态、主题名和退出码
+- `crates/superpower-core` — 终端核心（Cell、Grid、Cursor、Parser、Selection、DamageTracker）
+- `crates/superpower-pty` — PTY 封装（`PtySession`、`PtyEvent`）
+- `crates/superpower-renderer` — GPU 渲染器（字形 atlas、文本渲染、UI 绘制）
+- `crates/superpower-app` — 应用层（配置、事件循环、UI 壳）
 
-当前实现仍然保持 `winit + wgpu` 主技术栈，没有引入额外 GUI 框架。
+## 配置
 
-## 后续开发清单
+运行时自动加载 TOML 配置文件，默认路径由 `superpower_app::config::Config::config_path()` 决定。
 
-### P0 - 达到可正常使用终端
+默认配置：
 
-#### Phase A.1 全屏 TUI 兼容
+- Shell: `cmd.exe`
+- 字体: `Consolas 14px`
 
-- [x] 实现 `alternate screen buffer`
-- [x] 接入 `bracketed paste`
-- [x] 接入鼠标报告模式
-- [x] 补齐与全屏 TUI 最相关的高频 `CSI / DEC private mode`
-- [ ] 增加 `vim / less / fzf / git log --patch` 的实机回归
+## License
 
-#### Phase A.2 输入完整性
-
-- [x] 接入 IME / 中文输入提交链路
-- [x] 完善应用小键盘模式序列
-- [x] 补齐更多修饰键组合兼容性
-- [x] 校验 `AltGr`、国际键盘布局与终端输入编码逻辑
-
-#### Phase A.3 稳定性收口
-
-- [x] 优化 shell 退出后的窗口行为与提示
-- [x] 增加异常场景日志与错误反馈
-- [x] 增加协议与事件层相关测试
-- [ ] 完成 `cmd.exe` / PowerShell / `git` 的回归验证
-
-#### Phase A.4 交互收口
-
-- [x] 实现拖拽选择自动滚动
-- [x] 实现 IME preedit 基础可视化
-- [ ] 根据真实 GUI 工作流继续打磨 preedit 细节
-
-### P1 - 字体链路深化
-
-#### Phase B.1 DirectWrite 深化接入
-
-- [x] 将 DirectWrite 从“度量”推进到“主字体单字形光栅化”
-- [x] 保持 `fontdue` 作为 fallback，避免一次性切换风险
-- [x] 校验 atlas 结构与 DirectWrite 输出的兼容性
-- [ ] 为字体加载、fallback 失败场景补齐日志
-
-#### Phase B.2 CJK 与 fallback 提升
-
-- [x] 提升中日韩字符显示质量
-- [ ] 优化宽字符定位与边界处理
-- [x] 提升系统字体 fallback 命中率与稳定性
-- [ ] 为复杂文本场景补充回归样例
-
-#### Phase B.3 渲染质量优化
-
-- [x] 优化 atlas 放置策略，减少行扫描浪费
-- [ ] 评估大量输出下的 cache / atlas 退化问题
-- [ ] 增加长时间运行和高频刷屏的性能验证
-
-### P2 - 体验增强
-
-#### Phase C.1 基础体验增强
-
-- [ ] 配置热重载
-- [x] 主题系统
-- [ ] URL 检测与点击
-- [ ] 更强的快捷键体系
-
-#### Phase C.2 高级能力
-
-- [ ] Emoji / 彩色字形
-- [ ] Ligatures
-- [x] 多标签页
-- [ ] 性能监控面板
-
-## 推荐推进顺序
-
-1. 先完成 `P0`，把项目从“可试用”推进到“可正常使用”。
-2. 再推进 `P1`，把字体链路做扎实。
-3. 最后做 `P2`，提升体验和高级能力。
-
-## 当前剩余发布前风险
-
-- 还缺少 `vim / less / fzf / git` 的真实 GUI 手工回归
-- IME 当前已具备基础 preedit 可视化，但仍未针对复杂候选/组合输入做细致打磨
-- 更深层的 `CSI / DEC private mode` 仍需要根据真实 TUI trace 持续补齐
-- DirectWrite 已扩展到更多字体场景，但 fallback 链仍保留 `fontdue` 兜底
-- 新增的桌面 UI 壳已经可用，但还需要真实用户路径下的命中体验和窗口级交互回归
+MIT
