@@ -96,6 +96,8 @@ pub struct Terminal {
     pub title: String,
     /// 当前选区
     pub selection: Option<Selection>,
+    /// 当前活动的超链接 URL
+    current_hyperlink: Option<String>,
 }
 
 /// 终端处理器 — 持有 Parser，驱动 Terminal 状态更新
@@ -202,6 +204,7 @@ impl Terminal {
             pending_output: Vec::new(),
             title: String::new(),
             selection: None,
+            current_hyperlink: None,
         };
         // 首帧强制全量重绘，确保窗口初始化时就有稳定输出。
         terminal.damage.mark_full_redraw();
@@ -254,7 +257,7 @@ impl Terminal {
             foreground: self.foreground,
             background: self.background,
             flags: self.cell_flags,
-            hyperlink: None,
+            hyperlink: self.current_hyperlink.clone(),
         }
     }
 
