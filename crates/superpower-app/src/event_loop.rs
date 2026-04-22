@@ -172,6 +172,8 @@ struct App {
     last_config_check: Instant,
     /// 当前鼠标悬停的超链接 URL
     hovered_hyperlink: Option<String>,
+    /// 当前鼠标悬停的 UI 动作
+    hovered_action: Option<UiAction>,
 }
 
 impl App {
@@ -196,6 +198,7 @@ impl App {
             settings_open: false,
             tabs: Vec::new(),
             active_tab: 0,
+            hovered_action: None,
             font_size: config.font.size,
             status: StatusView {
                 shell_label: shell_label(config.shell.program.as_str()),
@@ -232,6 +235,7 @@ impl App {
             last_config_mtime,
             last_config_check: Instant::now(),
             hovered_hyperlink: None,
+            hovered_action: None,
         }
     }
 
@@ -313,6 +317,7 @@ impl App {
             settings_open: self.settings_open,
             tabs: self.tab_views(),
             active_tab: self.active_tab,
+            hovered_action: self.hovered_action.clone(),
             font_size,
             status: self.status_view(current_rows, current_cols),
         });
@@ -344,6 +349,7 @@ impl App {
             settings_open: self.settings_open,
             tabs: self.tab_views(),
             active_tab: self.active_tab,
+            hovered_action: self.hovered_action.clone(),
             font_size,
             status: self.status_view(rows, cols),
         });
@@ -506,26 +512,22 @@ impl App {
     /// 打开 URL
     fn open_url(&self, url: &str) {
         tracing::info!("Opening URL: {}", url);
-        
+
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("cmd")
                 .args(["/c", "start", url])
                 .spawn();
         }
-        
+
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("open")
-                .arg(url)
-                .spawn();
+            let _ = std::process::Command::new("open").arg(url).spawn();
         }
-        
+
         #[cfg(target_os = "linux")]
         {
-            let _ = std::process::Command::new("xdg-open")
-                .arg(url)
-                .spawn();
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
         }
     }
 
@@ -542,7 +544,11 @@ impl App {
         };
 
         // 获取当前单元格的超链接
-        let hyperlink = tab.terminal.terminal.grid.cell(row, col)
+        let hyperlink = tab
+            .terminal
+            .terminal
+            .grid
+            .cell(row, col)
             .and_then(|cell| cell.hyperlink.clone());
 
         self.hovered_hyperlink = hyperlink;
@@ -562,7 +568,7 @@ impl App {
             // 开启搜索
             tab.search_state = Some(SearchState::new(String::new(), false, false));
         }
-        
+
         self.refresh_ui_model();
         self.request_redraw();
     }
@@ -693,6 +699,7 @@ impl App {
 
     /// 处理一个 UI 命中动作
     fn handle_ui_action(&mut self, action: UiAction) {
+        self.hovered_action = None;
         self.focus_area = FocusArea::Chrome;
 
         match action {
@@ -841,7 +848,7 @@ impl App {
 
         tab.terminal.terminal.grid.reset_display_offset();
         tab.terminal.terminal.damage.mark_full_redraw();
-        
+
         if let Err(err) = tab.pty.write(bytes) {
             tracing::error!("Failed to write input to PTY: {}", err);
             // 检查 PTY 是否仍然存活
@@ -950,7 +957,7 @@ impl App {
 
         tracing::info!("Config file changed, reloading...");
         let new_config = Config::load_from_file(&self.config_path);
-        
+
         // 更新快捷键
         self.shortcut_manager = if new_config.shortcuts.is_empty() {
             ShortcutManager::default()
@@ -970,7 +977,7 @@ impl App {
         self.config = new_config;
         self.last_config_mtime = Some(mtime);
         self.request_redraw();
-        
+
         tracing::info!("Config reloaded successfully");
     }
 
@@ -1274,7 +1281,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // 定期检查配置文件是否更新
                 self.check_and_reload_config();
-                
+
                 self.process_pty_events();
 
                 let active_index = self.active_tab;
@@ -1523,6 +1530,16 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.last_cursor_position = Some((position.x, position.y));
+                let next_hovered_action = self.ui_model.hit_test(position.x, position.y);
+                let hovered_changed = match (&self.hovered_action, &next_hovered_action) {
+                    (Some(current), Some(next)) => !current.same_target(next),
+                    (None, None) => false,
+                    _ => true,
+                };
+                if hovered_changed {
+                    self.hovered_action = next_hovered_action;
+                    self.refresh_ui_model();
+                }
                 let cursor_in_terminal = self.cursor_in_terminal_panel();
                 let pointer_cell = self.pixel_to_cell(position.x, position.y);
 

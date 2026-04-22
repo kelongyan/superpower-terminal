@@ -1,6 +1,6 @@
+use crate::config::Config;
 use serde::Deserialize;
 use std::collections::HashMap;
-use crate::config::Config;
 
 /// Profile 配置
 #[derive(Debug, Clone, Deserialize)]

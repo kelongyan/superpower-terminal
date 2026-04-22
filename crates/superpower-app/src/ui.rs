@@ -2,17 +2,22 @@ use superpower_core::Color;
 use superpower_renderer::{ChromeScene, Rect, TextAlign, UiQuad, UiText};
 
 /// 一体化顶部 chrome 高度
-const TOP_BAR_HEIGHT: f32 = 46.0;
+const TOP_BAR_HEIGHT: f32 = 52.0;
 /// 底部状态栏高度
-const STATUS_BAR_HEIGHT: f32 = 24.0;
+const STATUS_BAR_HEIGHT: f32 = 28.0;
 /// 右侧设置面板宽度
 const SETTINGS_PANEL_WIDTH: f32 = 288.0;
 /// 主内容区边距
-const CONTENT_GAP: f32 = 10.0;
+const CONTENT_GAP: f32 = 12.0;
 /// 通用按钮高度
-const BUTTON_HEIGHT: f32 = 28.0;
+const BUTTON_HEIGHT: f32 = 32.0;
 /// 标签页高度
-const TAB_HEIGHT: f32 = 32.0;
+const TAB_HEIGHT: f32 = 36.0;
+const TERMINAL_PANEL_RADIUS: f32 = 14.0;
+const PANEL_RADIUS: f32 = 16.0;
+const SECTION_RADIUS: f32 = 12.0;
+const BUTTON_RADIUS: f32 = 10.0;
+const TAB_RADIUS: f32 = 12.0;
 
 /// 可切换的内建主题
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +66,11 @@ pub struct AppTheme {
     pub accent: Color,
     pub accent_soft: Color,
     pub button_bg: Color,
+    pub button_hover_bg: Color,
     pub button_active_bg: Color,
     pub danger_bg: Color,
+    pub danger_hover_bg: Color,
+    pub tab_hover_bg: Color,
     pub terminal_foreground: Color,
     pub terminal_background: Color,
 }
@@ -88,8 +96,11 @@ impl AppTheme {
                 accent: Color::from_u32(0x75C7FF),
                 accent_soft: Color::from_u32(0x2D3A4F),
                 button_bg: Color::from_u32(0x2D303D),
+                button_hover_bg: Color::from_u32(0x373B49),
                 button_active_bg: Color::from_u32(0x41475A),
                 danger_bg: Color::from_u32(0x6D3542),
+                danger_hover_bg: Color::from_u32(0x834555),
+                tab_hover_bg: Color::from_u32(0x323644),
                 terminal_foreground: Color::from_u32(0xDCE3EF),
                 terminal_background: Color::from_u32(0x191B24),
             },
@@ -110,8 +121,11 @@ impl AppTheme {
                 accent: Color::from_u32(0x1F78C8),
                 accent_soft: Color::from_u32(0xD8E9F8),
                 button_bg: Color::from_u32(0xE0E8F0),
+                button_hover_bg: Color::from_u32(0xD5E1EC),
                 button_active_bg: Color::from_u32(0xC4D9ED),
                 danger_bg: Color::from_u32(0xE8C9CF),
+                danger_hover_bg: Color::from_u32(0xDEB8C0),
+                tab_hover_bg: Color::from_u32(0xE7EDF4),
                 terminal_foreground: Color::from_u32(0x2A3847),
                 terminal_background: Color::from_u32(0xFFFFFF),
             },
@@ -132,8 +146,11 @@ impl AppTheme {
                 accent: Color::from_u32(0xF4B942),
                 accent_soft: Color::from_u32(0x5D431A),
                 button_bg: Color::from_u32(0x3C2C18),
+                button_hover_bg: Color::from_u32(0x493621),
                 button_active_bg: Color::from_u32(0x5A4121),
                 danger_bg: Color::from_u32(0x6A2E1C),
+                danger_hover_bg: Color::from_u32(0x84402A),
+                tab_hover_bg: Color::from_u32(0x3A2B1B),
                 terminal_foreground: Color::from_u32(0xFFCA70),
                 terminal_background: Color::from_u32(0x0F0904),
             },
@@ -174,6 +191,7 @@ pub struct UiBuildState {
     pub settings_open: bool,
     pub tabs: Vec<TabView>,
     pub active_tab: usize,
+    pub hovered_action: Option<UiAction>,
     pub font_size: f32,
     pub status: StatusView,
 }
@@ -193,6 +211,26 @@ pub enum UiAction {
     PasteClipboard,
     ClearTerminal,
     ScrollToBottom,
+}
+
+impl UiAction {
+    pub fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::CreateTab, Self::CreateTab)
+            | (Self::ToggleSettings, Self::ToggleSettings)
+            | (Self::CycleTheme, Self::CycleTheme)
+            | (Self::DecreaseFont, Self::DecreaseFont)
+            | (Self::IncreaseFont, Self::IncreaseFont)
+            | (Self::CopySelection, Self::CopySelection)
+            | (Self::PasteClipboard, Self::PasteClipboard)
+            | (Self::ClearTerminal, Self::ClearTerminal)
+            | (Self::ScrollToBottom, Self::ScrollToBottom) => true,
+            (Self::SelectTheme(a), Self::SelectTheme(b)) => a == b,
+            (Self::ActivateTab(a), Self::ActivateTab(b)) => a == b,
+            (Self::CloseTab(a), Self::CloseTab(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// 单个可交互命中区域
@@ -285,7 +323,12 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
     let mut hit_targets = Vec::new();
 
     push_quad(&mut chrome, top_bar, state.theme.toolbar_bg);
-    push_quad(&mut chrome, terminal_panel, state.theme.terminal_panel_bg);
+    push_quad_rounded(
+        &mut chrome,
+        terminal_panel.inset(8.0, 8.0),
+        state.theme.terminal_panel_bg,
+        TERMINAL_PANEL_RADIUS,
+    );
     push_quad(&mut chrome, status_bar, state.theme.status_bg);
     push_quad(
         &mut chrome,
@@ -299,32 +342,34 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         state.theme.border,
     );
 
-    push_quad(
+    push_quad_rounded(
         &mut chrome,
-        Rect::new(14.0, 10.0, 18.0, 18.0),
-        state.theme.button_bg,
+        Rect::new(16.0, 14.0, 16.0, 16.0),
+        state.theme.accent_soft,
+        8.0,
     );
 
-    let new_tab_rect = Rect::new(state.window_width - 42.0, 9.0, 28.0, BUTTON_HEIGHT);
-    let settings_rect = Rect::new(new_tab_rect.x - 72.0, 9.0, 64.0, BUTTON_HEIGHT);
-    let theme_rect = Rect::new(settings_rect.x - 72.0, 9.0, 64.0, BUTTON_HEIGHT);
+    let new_tab_rect = Rect::new(state.window_width - 48.0, 10.0, 32.0, BUTTON_HEIGHT);
+    let settings_rect = Rect::new(new_tab_rect.x - 84.0, 10.0, 76.0, BUTTON_HEIGHT);
+    let theme_rect = Rect::new(settings_rect.x - 84.0, 10.0, 76.0, BUTTON_HEIGHT);
     for (rect, label, action) in [
         (theme_rect, "Theme".to_string(), UiAction::CycleTheme),
         (settings_rect, "Panel".to_string(), UiAction::ToggleSettings),
         (new_tab_rect, "+".to_string(), UiAction::CreateTab),
     ] {
+        let background = button_fill(state, &action, false);
         push_button(
             &mut chrome,
             &mut hit_targets,
             rect,
             label,
             action,
-            state.theme.button_bg,
+            background,
             state.theme.text_primary,
         );
     }
 
-    let tabs_left = 46.0;
+    let tabs_left = 50.0;
     let tabs_right = theme_rect.x - 14.0;
     let mut tab_x = tabs_left;
     for (index, tab) in state.tabs.iter().enumerate() {
@@ -340,13 +385,15 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
 
         let tab_rect = Rect::new(
             tab_x,
-            7.0,
+            9.0,
             tab_width.min((tabs_right - tab_x).max(112.0)),
             TAB_HEIGHT,
         );
-        let close_rect = Rect::new(tab_rect.right() - 24.0, tab_rect.y + 7.0, 14.0, 14.0);
+        let close_rect = Rect::new(tab_rect.right() - 26.0, tab_rect.y + 8.0, 16.0, 16.0);
         let bg = if tab.is_active {
             state.theme.tab_active_bg
+        } else if is_hovered(state, &UiAction::ActivateTab(index)) {
+            state.theme.tab_hover_bg
         } else {
             state.theme.tab_bg
         };
@@ -356,7 +403,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             state.theme.text_secondary
         };
 
-        push_quad(&mut chrome, tab_rect, bg);
+        push_quad_rounded(&mut chrome, tab_rect, bg, TAB_RADIUS);
         if tab.is_active {
             push_quad(
                 &mut chrome,
@@ -367,9 +414,9 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         push_text(
             &mut chrome,
             Rect::new(
-                tab_rect.x + 14.0,
-                tab_rect.y + 6.0,
-                tab_rect.width - 38.0,
+                tab_rect.x + 16.0,
+                tab_rect.y + 8.0,
+                tab_rect.width - 42.0,
                 18.0,
             ),
             title,
@@ -382,11 +429,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             close_rect,
             "x".to_string(),
             UiAction::CloseTab(index),
-            if tab.is_active {
-                state.theme.button_active_bg
-            } else {
-                state.theme.button_bg
-            },
+            button_fill(state, &UiAction::CloseTab(index), true),
             fg,
         );
 
@@ -399,7 +442,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
     }
 
     if let Some(panel) = settings_panel {
-        push_quad(&mut chrome, panel, state.theme.panel_bg);
+        push_quad_rounded(&mut chrome, panel, state.theme.panel_bg, PANEL_RADIUS);
         push_quad(
             &mut chrome,
             Rect::new(panel.x, panel.y, 1.0, panel.height),
@@ -413,23 +456,28 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             TextAlign::Left,
         );
 
-        let section_width = panel.width - 28.0;
-        let theme_section = Rect::new(panel.x + 14.0, panel.y + 42.0, section_width, 126.0);
+        let section_width = panel.width - 32.0;
+        let theme_section = Rect::new(panel.x + 16.0, panel.y + 46.0, section_width, 138.0);
         let font_section = Rect::new(
-            panel.x + 14.0,
-            theme_section.bottom() + 14.0,
+            panel.x + 16.0,
+            theme_section.bottom() + 16.0,
             section_width,
-            84.0,
+            92.0,
         );
         let action_section = Rect::new(
-            panel.x + 14.0,
-            font_section.bottom() + 14.0,
+            panel.x + 16.0,
+            font_section.bottom() + 16.0,
             section_width,
-            168.0,
+            178.0,
         );
 
         for section in [theme_section, font_section, action_section] {
-            push_quad(&mut chrome, section, state.theme.panel_section_bg);
+            push_quad_rounded(
+                &mut chrome,
+                section,
+                state.theme.panel_section_bg,
+                SECTION_RADIUS,
+            );
         }
 
         push_text(
@@ -456,15 +504,17 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
                 &mut chrome,
                 &mut hit_targets,
                 Rect::new(
-                    theme_section.x + 12.0,
+                    theme_section.x + 14.0,
                     button_y,
-                    section_width - 24.0,
+                    section_width - 28.0,
                     BUTTON_HEIGHT,
                 ),
                 preset.label().to_string(),
                 UiAction::SelectTheme(preset),
                 if is_active {
                     state.theme.button_active_bg
+                } else if is_hovered(state, &UiAction::SelectTheme(preset)) {
+                    state.theme.button_hover_bg
                 } else {
                     state.theme.button_bg
                 },
@@ -489,14 +539,14 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             &mut hit_targets,
             Rect::new(
-                font_section.x + 12.0,
+                font_section.x + 14.0,
                 font_section.y + 34.0,
                 48.0,
                 BUTTON_HEIGHT,
             ),
             "-".to_string(),
             UiAction::DecreaseFont,
-            state.theme.button_bg,
+            button_fill(state, &UiAction::DecreaseFont, false),
             state.theme.text_primary,
         );
         push_text(
@@ -515,14 +565,14 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             &mut hit_targets,
             Rect::new(
-                font_section.x + 168.0,
+                font_section.x + 176.0,
                 font_section.y + 34.0,
                 48.0,
                 BUTTON_HEIGHT,
             ),
             "+".to_string(),
             UiAction::IncreaseFont,
-            state.theme.button_bg,
+            button_fill(state, &UiAction::IncreaseFont, false),
             state.theme.text_primary,
         );
 
@@ -547,18 +597,19 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         ];
         let mut row_y = action_section.y + 34.0;
         for (label, action) in action_buttons {
+            let background = button_fill(state, &action, false);
             push_button(
                 &mut chrome,
                 &mut hit_targets,
                 Rect::new(
-                    action_section.x + 12.0,
+                    action_section.x + 14.0,
                     row_y,
-                    section_width - 24.0,
+                    section_width - 28.0,
                     BUTTON_HEIGHT,
                 ),
                 label.to_string(),
                 action,
-                state.theme.button_bg,
+                background,
                 state.theme.text_primary,
             );
             row_y += BUTTON_HEIGHT + 6.0;
@@ -601,7 +652,10 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             state.window_width * 0.40 - 16.0,
             status_bar.height,
         ),
-        "Ctrl+Shift+T | Ctrl+Shift+C/V".to_string(),
+        format!(
+            "{}  |  Ctrl+Shift+T  |  Ctrl+Shift+C/V",
+            state.status.theme_name
+        ),
         state.theme.text_secondary,
         TextAlign::Right,
     );
@@ -615,7 +669,19 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
 
 /// 追加一个纯色矩形
 fn push_quad(chrome: &mut ChromeScene, rect: Rect, color: Color) {
-    chrome.quads.push(UiQuad { rect, color });
+    chrome.quads.push(UiQuad {
+        rect,
+        color,
+        radius: 0.0,
+    });
+}
+
+fn push_quad_rounded(chrome: &mut ChromeScene, rect: Rect, color: Color, radius: f32) {
+    chrome.quads.push(UiQuad {
+        rect,
+        color,
+        radius,
+    });
 }
 
 /// 追加一行文本
@@ -638,7 +704,7 @@ fn push_button(
     background: Color,
     foreground: Color,
 ) {
-    push_quad(chrome, rect, background);
+    push_quad_rounded(chrome, rect, background, BUTTON_RADIUS);
     push_text(chrome, rect, label, foreground, TextAlign::Center);
     hit_targets.push(HitTarget { rect, action });
 }
@@ -646,6 +712,27 @@ fn push_button(
 /// 追加一条横向边界线
 fn push_border_line(chrome: &mut ChromeScene, y: f32, width: f32, color: Color) {
     push_quad(chrome, Rect::new(0.0, y, width, 1.0), color);
+}
+
+fn is_hovered(state: &UiBuildState, action: &UiAction) -> bool {
+    state
+        .hovered_action
+        .as_ref()
+        .is_some_and(|hovered| hovered.same_target(action))
+}
+
+fn button_fill(state: &UiBuildState, action: &UiAction, danger: bool) -> Color {
+    if danger {
+        if is_hovered(state, action) {
+            state.theme.danger_hover_bg
+        } else {
+            state.theme.danger_bg
+        }
+    } else if is_hovered(state, action) {
+        state.theme.button_hover_bg
+    } else {
+        state.theme.button_bg
+    }
 }
 
 /// 估算紧凑标签页宽度，避免过短和过长

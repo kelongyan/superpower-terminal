@@ -67,9 +67,18 @@ impl ShortcutManager {
         bindings.insert(Shortcut::new("V", true, true, false), ShortcutAction::Paste);
 
         // 标签页管理
-        bindings.insert(Shortcut::new("T", true, true, false), ShortcutAction::NewTab);
-        bindings.insert(Shortcut::new("W", true, true, false), ShortcutAction::CloseTab);
-        bindings.insert(Shortcut::new("TAB", true, false, false), ShortcutAction::NextTab);
+        bindings.insert(
+            Shortcut::new("T", true, true, false),
+            ShortcutAction::NewTab,
+        );
+        bindings.insert(
+            Shortcut::new("W", true, true, false),
+            ShortcutAction::CloseTab,
+        );
+        bindings.insert(
+            Shortcut::new("TAB", true, false, false),
+            ShortcutAction::NextTab,
+        );
         bindings.insert(
             Shortcut::new("TAB", true, true, false),
             ShortcutAction::PreviousTab,
@@ -132,7 +141,11 @@ impl ShortcutManager {
     }
 
     /// 查找匹配的快捷键动作
-    pub fn find_action(&self, keycode: KeyCode, modifiers: ModifiersState) -> Option<ShortcutAction> {
+    pub fn find_action(
+        &self,
+        keycode: KeyCode,
+        modifiers: ModifiersState,
+    ) -> Option<ShortcutAction> {
         for (shortcut, action) in &self.bindings {
             if shortcut.matches(keycode, modifiers) {
                 return Some(*action);

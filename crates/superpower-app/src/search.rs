@@ -185,8 +185,7 @@ impl SearchState {
 
     /// 获取当前匹配项
     pub fn current(&self) -> Option<&SearchMatch> {
-        self.current_match
-            .and_then(|idx| self.matches.get(idx))
+        self.current_match.and_then(|idx| self.matches.get(idx))
     }
 
     /// 获取匹配数量
@@ -216,22 +215,22 @@ mod tests {
 
     fn create_test_grid() -> Grid {
         let mut grid = Grid::new(3, 10, 100);
-        
+
         // 第一行: "hello world"
         for (i, ch) in "hello worl".chars().enumerate() {
             grid.write_cell(0, i, Cell::new(ch));
         }
-        
+
         // 第二行: "test hello"
         for (i, ch) in "test hello".chars().enumerate() {
             grid.write_cell(1, i, Cell::new(ch));
         }
-        
+
         // 第三行: "HELLO test"
         for (i, ch) in "HELLO test".chars().enumerate() {
             grid.write_cell(2, i, Cell::new(ch));
         }
-        
+
         grid
     }
 
@@ -240,7 +239,7 @@ mod tests {
         let grid = create_test_grid();
         let mut search = SearchState::new("hello".to_string(), true, false);
         search.search(&grid).unwrap();
-        
+
         assert_eq!(search.match_count(), 2);
         assert_eq!(search.current_index(), Some(1));
     }
@@ -250,7 +249,7 @@ mod tests {
         let grid = create_test_grid();
         let mut search = SearchState::new("hello".to_string(), false, false);
         search.search(&grid).unwrap();
-        
+
         assert_eq!(search.match_count(), 3);
     }
 
@@ -259,18 +258,18 @@ mod tests {
         let grid = create_test_grid();
         let mut search = SearchState::new("hello".to_string(), false, false);
         search.search(&grid).unwrap();
-        
+
         assert_eq!(search.current_index(), Some(1));
-        
+
         search.next_match();
         assert_eq!(search.current_index(), Some(2));
-        
+
         search.next_match();
         assert_eq!(search.current_index(), Some(3));
-        
+
         search.next_match();
         assert_eq!(search.current_index(), Some(1)); // 循环回第一个
-        
+
         search.previous_match();
         assert_eq!(search.current_index(), Some(3));
     }
@@ -280,7 +279,7 @@ mod tests {
         let grid = create_test_grid();
         let mut search = SearchState::new("".to_string(), true, false);
         search.search(&grid).unwrap();
-        
+
         assert_eq!(search.match_count(), 0);
     }
 }

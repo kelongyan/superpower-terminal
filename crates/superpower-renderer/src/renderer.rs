@@ -15,7 +15,10 @@ use crate::dw_renderer::{DwRasterizer, FontBackend};
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct BgVertex {
     position: [f32; 2],
+    rect_pos: [f32; 2],
+    rect_size: [f32; 2],
     color: [f32; 3],
+    radius: f32,
 }
 
 /// 字形缓存键
@@ -120,6 +123,7 @@ pub enum TextAlign {
 pub struct UiQuad {
     pub rect: Rect,
     pub color: Color,
+    pub radius: f32,
 }
 
 /// 一段应用层文本绘制项
@@ -284,7 +288,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -844,17 +848,17 @@ impl Renderer {
         let screen_size = [self.width as f32, self.height as f32];
 
         for quad in &chrome.quads {
-            append_bg_quad(
-                &mut vertices,
-                quad.color,
-                [
-                    quad.rect.x,
-                    quad.rect.y,
-                    quad.rect.right(),
-                    quad.rect.bottom(),
-                ],
-                screen_size,
-            );
+            let rect = [
+                quad.rect.x,
+                quad.rect.y,
+                quad.rect.right(),
+                quad.rect.bottom(),
+            ];
+            if quad.radius > 0.0 {
+                append_bg_rounded_quad(&mut vertices, quad.color, rect, quad.radius, screen_size);
+            } else {
+                append_bg_quad(&mut vertices, quad.color, rect, screen_size);
+            }
         }
 
         vertices
@@ -1655,31 +1659,121 @@ fn append_bg_quad(
     let r = color.r as f32 / 255.0;
     let g = color.g as f32 / 255.0;
     let b = color.b as f32 / 255.0;
+    let rect_pos = [x0, y0];
+    let rect_size = [(x1 - x0).max(0.0), (y1 - y0).max(0.0)];
+    let radius = 0.0;
 
     vertices.extend_from_slice(&[
         BgVertex {
             position: [nx0, ny0],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
         },
         BgVertex {
             position: [nx1, ny0],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
         },
         BgVertex {
             position: [nx0, ny1],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
         },
         BgVertex {
             position: [nx0, ny1],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
         },
         BgVertex {
             position: [nx1, ny0],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
         },
         BgVertex {
             position: [nx1, ny1],
+            rect_pos,
+            rect_size,
             color: [r, g, b],
+            radius,
+        },
+    ]);
+}
+
+fn append_bg_rounded_quad(
+    vertices: &mut Vec<BgVertex>,
+    color: Color,
+    rect: [f32; 4],
+    radius: f32,
+    screen_size: [f32; 2],
+) {
+    let [x0, y0, x1, y1] = rect;
+    let [screen_width, screen_height] = screen_size;
+    let nx0 = x0 / screen_width * 2.0 - 1.0;
+    let ny0 = 1.0 - y0 / screen_height * 2.0;
+    let nx1 = x1 / screen_width * 2.0 - 1.0;
+    let ny1 = 1.0 - y1 / screen_height * 2.0;
+    let r = color.r as f32 / 255.0;
+    let g = color.g as f32 / 255.0;
+    let b = color.b as f32 / 255.0;
+    let rect_pos = [x0, y0];
+    let rect_size = [(x1 - x0).max(0.0), (y1 - y0).max(0.0)];
+    let radius = radius
+        .min(rect_size[0] * 0.5)
+        .min(rect_size[1] * 0.5)
+        .max(0.0);
+
+    vertices.extend_from_slice(&[
+        BgVertex {
+            position: [nx0, ny0],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
+        },
+        BgVertex {
+            position: [nx1, ny0],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
+        },
+        BgVertex {
+            position: [nx0, ny1],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
+        },
+        BgVertex {
+            position: [nx0, ny1],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
+        },
+        BgVertex {
+            position: [nx1, ny0],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
+        },
+        BgVertex {
+            position: [nx1, ny1],
+            rect_pos,
+            rect_size,
+            color: [r, g, b],
+            radius,
         },
     ]);
 }
@@ -1755,7 +1849,22 @@ impl BgVertex {
                 wgpu::VertexAttribute {
                     offset: mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                     shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
