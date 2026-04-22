@@ -170,6 +170,8 @@ struct App {
     last_config_mtime: Option<std::time::SystemTime>,
     /// 上次检查配置文件的时间
     last_config_check: Instant,
+    /// 当前鼠标悬停的超链接 URL
+    hovered_hyperlink: Option<String>,
 }
 
 impl App {
@@ -229,6 +231,7 @@ impl App {
             config_path,
             last_config_mtime,
             last_config_check: Instant::now(),
+            hovered_hyperlink: None,
         }
     }
 
@@ -498,6 +501,51 @@ impl App {
         self.settings_open = !self.settings_open;
         self.refresh_ui_model();
         self.request_redraw();
+    }
+
+    /// 打开 URL
+    fn open_url(&self, url: &str) {
+        tracing::info!("Opening URL: {}", url);
+        
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", url])
+                .spawn();
+        }
+        
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg(url)
+                .spawn();
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(url)
+                .spawn();
+        }
+    }
+
+    /// 更新鼠标悬停的超链接
+    fn update_hovered_hyperlink(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            self.hovered_hyperlink = None;
+            return;
+        };
+
+        let Some((row, col)) = tab.pointer_cell else {
+            self.hovered_hyperlink = None;
+            return;
+        };
+
+        // 获取当前单元格的超链接
+        let hyperlink = tab.terminal.terminal.grid.cell(row, col)
+            .and_then(|cell| cell.hyperlink.clone());
+
+        self.hovered_hyperlink = hyperlink;
     }
 
     /// 切换搜索模式
@@ -1402,6 +1450,18 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // 处理超链接点击（Ctrl+左键）
+                if state == ElementState::Released
+                    && button == MouseButton::Left
+                    && self.ctrl_pressed
+                    && self.cursor_in_terminal_panel()
+                {
+                    if let Some(url) = &self.hovered_hyperlink {
+                        self.open_url(url);
+                        return;
+                    }
+                }
+
                 if !self.cursor_in_terminal_panel() {
                     return;
                 }
@@ -1473,6 +1533,9 @@ impl ApplicationHandler for App {
                         None
                     };
                 }
+
+                // 更新悬停的超链接
+                self.update_hovered_hyperlink();
 
                 if self.should_report_mouse() {
                     let pointer_cell = self.active_tab().and_then(|tab| tab.pointer_cell);
