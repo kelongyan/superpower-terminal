@@ -19,6 +19,9 @@ use crate::ui::{
     build_ui_model, AppTheme, StatusView, TabView, ThemePreset, UiAction, UiBuildState, UiModel,
 };
 
+/// 配置文件检查间隔（秒）
+const CONFIG_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
 /// 选择拖拽模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionDragMode {
@@ -157,12 +160,19 @@ struct App {
     shortcut_manager: ShortcutManager,
     /// 初始字号（用于重置）
     initial_font_size: f32,
+    /// 配置文件路径
+    config_path: std::path::PathBuf,
+    /// 上次配置文件修改时间
+    last_config_mtime: Option<std::time::SystemTime>,
+    /// 上次检查配置文件的时间
+    last_config_check: Instant,
 }
 
 impl App {
     /// 创建应用实例，并预先加载配置
     fn new() -> Self {
-        let config = crate::config::Config::load_from_file(&crate::config::Config::config_path());
+        let config_path = crate::config::Config::config_path();
+        let config = crate::config::Config::load_from_file(&config_path);
         let theme = AppTheme::from_preset(ThemePreset::GraphiteDark);
         let shortcut_manager = if config.shortcuts.is_empty() {
             ShortcutManager::default()
@@ -170,6 +180,9 @@ impl App {
             ShortcutManager::from_config(&config.shortcuts)
         };
         let initial_font_size = config.font.size;
+        let last_config_mtime = std::fs::metadata(&config_path)
+            .and_then(|m| m.modified())
+            .ok();
         let ui_model = build_ui_model(&UiBuildState {
             window_width: config.window.width as f32,
             window_height: config.window.height as f32,
@@ -209,6 +222,9 @@ impl App {
             padding_y: 0.0,
             shortcut_manager,
             initial_font_size,
+            config_path,
+            last_config_mtime,
+            last_config_check: Instant::now(),
         }
     }
 
@@ -682,8 +698,15 @@ impl App {
 
         tab.terminal.terminal.grid.reset_display_offset();
         tab.terminal.terminal.damage.mark_full_redraw();
+        
         if let Err(err) = tab.pty.write(bytes) {
-            tracing::warn!("Failed to write input to PTY: {}", err);
+            tracing::error!("Failed to write input to PTY: {}", err);
+            // 检查 PTY 是否仍然存活
+            if !tab.pty.is_alive() {
+                tracing::error!("PTY process is dead, marking shell as exited");
+                let index = self.active_tab;
+                self.handle_shell_exit(index, -1);
+            }
         }
     }
 
@@ -701,7 +724,12 @@ impl App {
         }
 
         if let Err(err) = tab.pty.write(bytes) {
-            tracing::warn!("Failed to write raw PTY bytes: {}", err);
+            tracing::error!("Failed to write raw PTY bytes: {}", err);
+            // 检查 PTY 是否仍然存活
+            if !tab.pty.is_alive() {
+                tracing::error!("PTY process is dead, marking shell as exited");
+                self.handle_shell_exit(index, -1);
+            }
         }
     }
 
@@ -754,6 +782,53 @@ impl App {
             .map(|tab| format!("SuperPower Terminal - {}", tab.title))
             .unwrap_or_else(|| "SuperPower Terminal".to_string());
         window.set_title(title.as_str());
+    }
+
+    /// 检查并重新加载配置文件（如果已修改）
+    fn check_and_reload_config(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_config_check) < CONFIG_CHECK_INTERVAL {
+            return;
+        }
+        self.last_config_check = now;
+
+        let Ok(metadata) = std::fs::metadata(&self.config_path) else {
+            return;
+        };
+        let Ok(mtime) = metadata.modified() else {
+            return;
+        };
+
+        if let Some(last_mtime) = self.last_config_mtime {
+            if mtime <= last_mtime {
+                return;
+            }
+        }
+
+        tracing::info!("Config file changed, reloading...");
+        let new_config = Config::load_from_file(&self.config_path);
+        
+        // 更新快捷键
+        self.shortcut_manager = if new_config.shortcuts.is_empty() {
+            ShortcutManager::default()
+        } else {
+            ShortcutManager::from_config(&new_config.shortcuts)
+        };
+
+        // 更新字号（如果改变）
+        if (new_config.font.size - self.config.font.size).abs() > 0.1 {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_font_size(new_config.font.size);
+                self.update_cached_metrics();
+                self.refresh_ui_model();
+            }
+        }
+
+        self.config = new_config;
+        self.last_config_mtime = Some(mtime);
+        self.request_redraw();
+        
+        tracing::info!("Config reloaded successfully");
     }
 
     /// 将当前终端光标同步给 IME，避免候选框位置漂移
@@ -1054,6 +1129,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                // 定期检查配置文件是否更新
+                self.check_and_reload_config();
+                
                 self.process_pty_events();
 
                 let active_index = self.active_tab;

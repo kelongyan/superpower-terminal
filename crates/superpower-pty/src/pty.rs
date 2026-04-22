@@ -99,11 +99,28 @@ impl PtySession {
         })
     }
 
-    /// 向 PTY 写入数据
+    /// 向 PTY 写入数据，带重试机制
     pub fn write(&mut self, data: &[u8]) -> Result<(), String> {
-        self.writer
-            .write_all(data)
-            .map_err(|e| format!("PTY write error: {}", e))
+        const MAX_RETRIES: usize = 3;
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match self.writer.write_all(data) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES - 1 {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "PTY write error after {} retries: {}",
+            MAX_RETRIES,
+            last_error.unwrap()
+        ))
     }
 
     /// 调整 PTY 大小
