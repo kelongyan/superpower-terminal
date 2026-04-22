@@ -1,24 +1,18 @@
 use superpower_core::Color;
 use superpower_renderer::{ChromeScene, Rect, TextAlign, UiQuad, UiText};
 
-/// 顶部工具栏高度
-const TOOLBAR_HEIGHT: f32 = 48.0;
-/// 标签栏高度
-const TAB_BAR_HEIGHT: f32 = 40.0;
+/// 一体化顶部 chrome 高度
+const TOP_BAR_HEIGHT: f32 = 46.0;
 /// 底部状态栏高度
-const STATUS_BAR_HEIGHT: f32 = 30.0;
+const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// 右侧设置面板宽度
-const SETTINGS_PANEL_WIDTH: f32 = 300.0;
+const SETTINGS_PANEL_WIDTH: f32 = 288.0;
 /// 主内容区边距
-const CONTENT_GAP: f32 = 12.0;
+const CONTENT_GAP: f32 = 10.0;
 /// 通用按钮高度
-const BUTTON_HEIGHT: f32 = 32.0;
-/// 终端面板头部高度
-const TERMINAL_HEADER_HEIGHT: f32 = 48.0;
-/// 欢迎卡片宽度
-const WELCOME_CARD_WIDTH: f32 = 520.0;
-/// 欢迎卡片高度
-const WELCOME_CARD_HEIGHT: f32 = 220.0;
+const BUTTON_HEIGHT: f32 = 28.0;
+/// 标签页高度
+const TAB_HEIGHT: f32 = 32.0;
 
 /// 可切换的内建主题
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,25 +73,25 @@ impl AppTheme {
         match preset {
             ThemePreset::GraphiteDark => Self {
                 preset,
-                window_bg: Color::from_u32(0x11161C),
-                toolbar_bg: Color::from_u32(0x1A222C),
-                toolbar_fg: Color::from_u32(0xF3F6F9),
-                tab_bg: Color::from_u32(0x202A35),
-                tab_active_bg: Color::from_u32(0x2B3A4A),
-                panel_bg: Color::from_u32(0x161E27),
-                panel_section_bg: Color::from_u32(0x1F2934),
-                status_bg: Color::from_u32(0x141B23),
-                terminal_panel_bg: Color::from_u32(0x11161C),
-                border: Color::from_u32(0x2F3E4E),
-                text_primary: Color::from_u32(0xE9EEF4),
-                text_secondary: Color::from_u32(0x9EACBA),
-                accent: Color::from_u32(0x4EB4FF),
-                accent_soft: Color::from_u32(0x264B67),
-                button_bg: Color::from_u32(0x233041),
-                button_active_bg: Color::from_u32(0x335272),
+                window_bg: Color::from_u32(0x191B24),
+                toolbar_bg: Color::from_u32(0x232530),
+                toolbar_fg: Color::from_u32(0xF4F6FA),
+                tab_bg: Color::from_u32(0x2B2E3A),
+                tab_active_bg: Color::from_u32(0x343847),
+                panel_bg: Color::from_u32(0x1D202A),
+                panel_section_bg: Color::from_u32(0x292C39),
+                status_bg: Color::from_u32(0x202330),
+                terminal_panel_bg: Color::from_u32(0x191B24),
+                border: Color::from_u32(0x3B4153),
+                text_primary: Color::from_u32(0xF1F3F8),
+                text_secondary: Color::from_u32(0xA8B0C0),
+                accent: Color::from_u32(0x75C7FF),
+                accent_soft: Color::from_u32(0x2D3A4F),
+                button_bg: Color::from_u32(0x2D303D),
+                button_active_bg: Color::from_u32(0x41475A),
                 danger_bg: Color::from_u32(0x6D3542),
-                terminal_foreground: Color::from_u32(0xD6E2F0),
-                terminal_background: Color::from_u32(0x0E141B),
+                terminal_foreground: Color::from_u32(0xDCE3EF),
+                terminal_background: Color::from_u32(0x191B24),
             },
             ThemePreset::PaperLight => Self {
                 preset,
@@ -171,14 +165,6 @@ pub struct StatusView {
     pub exit_code: Option<i32>,
 }
 
-/// 终端首屏欢迎信息
-#[derive(Debug, Clone)]
-pub struct WelcomeView {
-    pub title: String,
-    pub subtitle: String,
-    pub hints: Vec<String>,
-}
-
 /// 构建 UI 所需的状态快照
 #[derive(Debug, Clone)]
 pub struct UiBuildState {
@@ -189,9 +175,6 @@ pub struct UiBuildState {
     pub tabs: Vec<TabView>,
     pub active_tab: usize,
     pub font_size: f32,
-    pub active_title: String,
-    pub active_subtitle: String,
-    pub welcome: Option<WelcomeView>,
     pub status: StatusView,
 }
 
@@ -222,8 +205,7 @@ pub struct HitTarget {
 /// 应用层布局结果
 #[derive(Debug, Clone)]
 pub struct AppLayout {
-    pub toolbar: Rect,
-    pub tab_bar: Rect,
+    pub top_bar: Rect,
     pub content: Rect,
     pub terminal_panel: Rect,
     pub terminal_viewport: Rect,
@@ -251,19 +233,18 @@ impl UiModel {
 
 /// 构建整窗 UI，包括布局、绘制项和命中区域
 pub fn build_ui_model(state: &UiBuildState) -> UiModel {
-    let toolbar = Rect::new(0.0, 0.0, state.window_width, TOOLBAR_HEIGHT);
-    let tab_bar = Rect::new(0.0, toolbar.bottom(), state.window_width, TAB_BAR_HEIGHT);
+    let top_bar = Rect::new(0.0, 0.0, state.window_width, TOP_BAR_HEIGHT);
     let status_bar = Rect::new(
         0.0,
-        (state.window_height - STATUS_BAR_HEIGHT).max(tab_bar.bottom()),
+        (state.window_height - STATUS_BAR_HEIGHT).max(top_bar.bottom()),
         state.window_width,
         STATUS_BAR_HEIGHT,
     );
     let content = Rect::new(
         0.0,
-        tab_bar.bottom(),
+        top_bar.bottom(),
         state.window_width,
-        (status_bar.y - tab_bar.bottom()).max(0.0),
+        (status_bar.y - top_bar.bottom()).max(0.0),
     );
 
     let settings_panel = state.settings_open.then(|| {
@@ -276,36 +257,19 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
     });
 
     let terminal_panel = if let Some(panel) = settings_panel {
-        Rect::new(
-            CONTENT_GAP,
-            content.y + CONTENT_GAP,
-            (panel.x - CONTENT_GAP * 2.0).max(220.0),
-            (content.height - CONTENT_GAP * 2.0).max(120.0),
-        )
+        Rect::new(0.0, content.y, panel.x.max(220.0), content.height)
     } else {
-        Rect::new(
-            CONTENT_GAP,
-            content.y + CONTENT_GAP,
-            (content.width - CONTENT_GAP * 2.0).max(220.0),
-            (content.height - CONTENT_GAP * 2.0).max(120.0),
-        )
+        Rect::new(0.0, content.y, content.width, content.height)
     };
-    let terminal_header = Rect::new(
-        terminal_panel.x + 1.0,
-        terminal_panel.y + 1.0,
-        (terminal_panel.width - 2.0).max(0.0),
-        TERMINAL_HEADER_HEIGHT,
-    );
     let terminal_viewport = Rect::new(
-        terminal_panel.x + 16.0,
-        terminal_header.bottom() + 12.0,
-        (terminal_panel.width - 32.0).max(1.0),
-        (terminal_panel.height - TERMINAL_HEADER_HEIGHT - 28.0).max(1.0),
+        terminal_panel.x + 18.0,
+        terminal_panel.y + 16.0,
+        (terminal_panel.width - 36.0).max(1.0),
+        (terminal_panel.height - 30.0).max(1.0),
     );
 
     let layout = AppLayout {
-        toolbar,
-        tab_bar,
+        top_bar,
         content,
         terminal_panel,
         terminal_viewport,
@@ -320,61 +284,12 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
     };
     let mut hit_targets = Vec::new();
 
-    push_quad(&mut chrome, toolbar, state.theme.toolbar_bg);
-    push_quad(&mut chrome, tab_bar, state.theme.tab_bg);
+    push_quad(&mut chrome, top_bar, state.theme.toolbar_bg);
     push_quad(&mut chrome, terminal_panel, state.theme.terminal_panel_bg);
-    push_quad(&mut chrome, terminal_header, state.theme.panel_section_bg);
     push_quad(&mut chrome, status_bar, state.theme.status_bg);
     push_quad(
         &mut chrome,
-        Rect::new(
-            terminal_panel.x,
-            terminal_panel.y,
-            terminal_panel.width,
-            1.0,
-        ),
-        state.theme.accent_soft,
-    );
-    push_quad(
-        &mut chrome,
-        Rect::new(
-            terminal_panel.x,
-            terminal_panel.bottom() - 1.0,
-            terminal_panel.width,
-            1.0,
-        ),
-        state.theme.border,
-    );
-    push_quad(
-        &mut chrome,
-        Rect::new(
-            terminal_panel.x,
-            terminal_panel.y,
-            1.0,
-            terminal_panel.height,
-        ),
-        state.theme.border,
-    );
-    push_quad(
-        &mut chrome,
-        Rect::new(
-            terminal_panel.right() - 1.0,
-            terminal_panel.y,
-            1.0,
-            terminal_panel.height,
-        ),
-        state.theme.border,
-    );
-    push_border_line(
-        &mut chrome,
-        toolbar.bottom(),
-        state.window_width,
-        state.theme.border,
-    );
-    push_border_line(
-        &mut chrome,
-        tab_bar.bottom(),
-        state.window_width,
+        Rect::new(0.0, top_bar.bottom() - 1.0, state.window_width, 1.0),
         state.theme.border,
     );
     push_border_line(
@@ -384,51 +299,20 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         state.theme.border,
     );
 
-    push_text(
+    push_quad(
         &mut chrome,
-        Rect::new(18.0, 2.0, 240.0, 24.0),
-        "SuperPower Desktop".to_string(),
-        state.theme.toolbar_fg,
-        TextAlign::Left,
-    );
-    push_text(
-        &mut chrome,
-        Rect::new(18.0, 20.0, 260.0, 22.0),
-        "Local terminal with tabs, themes and settings".to_string(),
-        state.theme.text_secondary,
-        TextAlign::Left,
-    );
-    push_text(
-        &mut chrome,
-        Rect::new(state.window_width - 440.0, 2.0, 104.0, 24.0),
-        format!("Theme: {}", state.theme.name()),
-        state.theme.accent,
-        TextAlign::Right,
+        Rect::new(14.0, 10.0, 18.0, 18.0),
+        state.theme.button_bg,
     );
 
-    let toolbar_buttons = [
-        (
-            Rect::new(state.window_width - 348.0, 8.0, 100.0, BUTTON_HEIGHT),
-            "Cycle Theme".to_string(),
-            UiAction::CycleTheme,
-        ),
-        (
-            Rect::new(state.window_width - 236.0, 8.0, 108.0, BUTTON_HEIGHT),
-            if state.settings_open {
-                "Hide Panel".to_string()
-            } else {
-                "Open Panel".to_string()
-            },
-            UiAction::ToggleSettings,
-        ),
-        (
-            Rect::new(state.window_width - 114.0, 8.0, 96.0, BUTTON_HEIGHT),
-            "+ New Tab".to_string(),
-            UiAction::CreateTab,
-        ),
-    ];
-
-    for (rect, label, action) in toolbar_buttons {
+    let new_tab_rect = Rect::new(state.window_width - 42.0, 9.0, 28.0, BUTTON_HEIGHT);
+    let settings_rect = Rect::new(new_tab_rect.x - 72.0, 9.0, 64.0, BUTTON_HEIGHT);
+    let theme_rect = Rect::new(settings_rect.x - 72.0, 9.0, 64.0, BUTTON_HEIGHT);
+    for (rect, label, action) in [
+        (theme_rect, "Theme".to_string(), UiAction::CycleTheme),
+        (settings_rect, "Panel".to_string(), UiAction::ToggleSettings),
+        (new_tab_rect, "+".to_string(), UiAction::CreateTab),
+    ] {
         push_button(
             &mut chrome,
             &mut hit_targets,
@@ -440,10 +324,27 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         );
     }
 
-    let mut tab_x = 12.0;
+    let tabs_left = 46.0;
+    let tabs_right = theme_rect.x - 14.0;
+    let mut tab_x = tabs_left;
     for (index, tab) in state.tabs.iter().enumerate() {
-        let tab_rect = Rect::new(tab_x, tab_bar.y + 4.0, 214.0, TAB_BAR_HEIGHT - 8.0);
-        let close_rect = Rect::new(tab_rect.right() - 28.0, tab_rect.y + 4.0, 24.0, 22.0);
+        let title = if tab.is_exited {
+            format!("{} [exit]", truncate_text(tab.title.as_str(), 16))
+        } else {
+            truncate_text(tab.title.as_str(), 20)
+        };
+        let tab_width = compute_tab_width(title.as_str());
+        if tab_x + 112.0 > tabs_right {
+            break;
+        }
+
+        let tab_rect = Rect::new(
+            tab_x,
+            7.0,
+            tab_width.min((tabs_right - tab_x).max(112.0)),
+            TAB_HEIGHT,
+        );
+        let close_rect = Rect::new(tab_rect.right() - 24.0, tab_rect.y + 7.0, 14.0, 14.0);
         let bg = if tab.is_active {
             state.theme.tab_active_bg
         } else {
@@ -459,7 +360,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         if tab.is_active {
             push_quad(
                 &mut chrome,
-                Rect::new(tab_rect.x, tab_rect.y, tab_rect.width, 2.0),
+                Rect::new(tab_rect.x, top_bar.bottom() - 2.0, tab_rect.width, 2.0),
                 state.theme.accent,
             );
         }
@@ -467,32 +368,12 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             Rect::new(
                 tab_rect.x + 14.0,
-                tab_rect.y + 2.0,
-                tab_rect.width - 48.0,
+                tab_rect.y + 6.0,
+                tab_rect.width - 38.0,
                 18.0,
             ),
-            if tab.is_exited {
-                format!("{}  [exit]", truncate_text(tab.title.as_str(), 18))
-            } else {
-                truncate_text(tab.title.as_str(), 20)
-            },
+            title,
             fg,
-            TextAlign::Left,
-        );
-        push_text(
-            &mut chrome,
-            Rect::new(
-                tab_rect.x + 14.0,
-                tab_rect.y + 17.0,
-                tab_rect.width - 48.0,
-                16.0,
-            ),
-            if tab.is_active {
-                "Active session".to_string()
-            } else {
-                "Background session".to_string()
-            },
-            state.theme.text_secondary,
             TextAlign::Left,
         );
         push_button(
@@ -514,57 +395,8 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             action: UiAction::ActivateTab(index),
         });
 
-        tab_x += tab_rect.width + 8.0;
+        tab_x += tab_rect.width + 6.0;
     }
-
-    push_text(
-        &mut chrome,
-        Rect::new(
-            terminal_header.x + 16.0,
-            terminal_header.y + 4.0,
-            terminal_header.width * 0.55,
-            20.0,
-        ),
-        truncate_text(state.active_title.as_str(), 36),
-        state.theme.text_primary,
-        TextAlign::Left,
-    );
-    push_text(
-        &mut chrome,
-        Rect::new(
-            terminal_header.x + 16.0,
-            terminal_header.y + 22.0,
-            terminal_header.width * 0.55,
-            18.0,
-        ),
-        truncate_text(state.active_subtitle.as_str(), 56),
-        state.theme.text_secondary,
-        TextAlign::Left,
-    );
-    push_text(
-        &mut chrome,
-        Rect::new(
-            terminal_header.right() - 220.0,
-            terminal_header.y + 6.0,
-            204.0,
-            18.0,
-        ),
-        format!("Font {:.1} pt", state.font_size),
-        state.theme.accent,
-        TextAlign::Right,
-    );
-    push_text(
-        &mut chrome,
-        Rect::new(
-            terminal_header.right() - 220.0,
-            terminal_header.y + 22.0,
-            204.0,
-            18.0,
-        ),
-        format!("{} tabs open", state.tabs.len()),
-        state.theme.text_secondary,
-        TextAlign::Right,
-    );
 
     if let Some(panel) = settings_panel {
         push_quad(&mut chrome, panel, state.theme.panel_bg);
@@ -575,25 +407,25 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         );
         push_text(
             &mut chrome,
-            Rect::new(panel.x + 16.0, panel.y + 10.0, panel.width - 32.0, 28.0),
+            Rect::new(panel.x + 16.0, panel.y + 10.0, panel.width - 32.0, 22.0),
             "Settings".to_string(),
             state.theme.text_primary,
             TextAlign::Left,
         );
 
-        let section_width = panel.width - 32.0;
-        let theme_section = Rect::new(panel.x + 16.0, panel.y + 48.0, section_width, 132.0);
+        let section_width = panel.width - 28.0;
+        let theme_section = Rect::new(panel.x + 14.0, panel.y + 42.0, section_width, 126.0);
         let font_section = Rect::new(
-            panel.x + 16.0,
-            theme_section.bottom() + 16.0,
+            panel.x + 14.0,
+            theme_section.bottom() + 14.0,
             section_width,
-            88.0,
+            84.0,
         );
         let action_section = Rect::new(
-            panel.x + 16.0,
-            font_section.bottom() + 16.0,
+            panel.x + 14.0,
+            font_section.bottom() + 14.0,
             section_width,
-            178.0,
+            168.0,
         );
 
         for section in [theme_section, font_section, action_section] {
@@ -604,9 +436,9 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             Rect::new(
                 theme_section.x + 12.0,
-                theme_section.y + 6.0,
+                theme_section.y + 8.0,
                 section_width - 24.0,
-                24.0,
+                18.0,
             ),
             "Theme".to_string(),
             state.theme.text_primary,
@@ -617,7 +449,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             ThemePreset::PaperLight,
             ThemePreset::TerminalAmber,
         ];
-        let mut button_y = theme_section.y + 36.0;
+        let mut button_y = theme_section.y + 34.0;
         for preset in theme_presets {
             let is_active = state.theme.preset == preset;
             push_button(
@@ -638,16 +470,16 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
                 },
                 state.theme.text_primary,
             );
-            button_y += BUTTON_HEIGHT + 8.0;
+            button_y += BUTTON_HEIGHT + 6.0;
         }
 
         push_text(
             &mut chrome,
             Rect::new(
                 font_section.x + 12.0,
-                font_section.y + 6.0,
+                font_section.y + 8.0,
                 section_width - 24.0,
-                24.0,
+                18.0,
             ),
             "Font Size".to_string(),
             state.theme.text_primary,
@@ -658,8 +490,8 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut hit_targets,
             Rect::new(
                 font_section.x + 12.0,
-                font_section.y + 38.0,
-                56.0,
+                font_section.y + 34.0,
+                48.0,
                 BUTTON_HEIGHT,
             ),
             "-".to_string(),
@@ -670,9 +502,9 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         push_text(
             &mut chrome,
             Rect::new(
-                font_section.x + 74.0,
-                font_section.y + 38.0,
-                84.0,
+                font_section.x + 66.0,
+                font_section.y + 34.0,
+                96.0,
                 BUTTON_HEIGHT,
             ),
             format!("{:.1} pt", state.font_size),
@@ -683,9 +515,9 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             &mut hit_targets,
             Rect::new(
-                font_section.x + 164.0,
-                font_section.y + 38.0,
-                56.0,
+                font_section.x + 168.0,
+                font_section.y + 34.0,
+                48.0,
                 BUTTON_HEIGHT,
             ),
             "+".to_string(),
@@ -698,11 +530,11 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             &mut chrome,
             Rect::new(
                 action_section.x + 12.0,
-                action_section.y + 6.0,
+                action_section.y + 8.0,
                 section_width - 24.0,
-                24.0,
+                18.0,
             ),
-            "Terminal Actions".to_string(),
+            "Actions".to_string(),
             state.theme.text_primary,
             TextAlign::Left,
         );
@@ -713,7 +545,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
             ("Clear", UiAction::ClearTerminal),
             ("Bottom", UiAction::ScrollToBottom),
         ];
-        let mut row_y = action_section.y + 38.0;
+        let mut row_y = action_section.y + 34.0;
         for (label, action) in action_buttons {
             push_button(
                 &mut chrome,
@@ -729,57 +561,12 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
                 state.theme.button_bg,
                 state.theme.text_primary,
             );
-            row_y += BUTTON_HEIGHT + 8.0;
-        }
-    }
-
-    if let Some(welcome) = &state.welcome {
-        let card = Rect::new(
-            terminal_panel.x + (terminal_panel.width - WELCOME_CARD_WIDTH).max(24.0) * 0.5,
-            terminal_header.bottom()
-                + ((terminal_panel.height - TERMINAL_HEADER_HEIGHT - WELCOME_CARD_HEIGHT)
-                    .max(40.0)
-                    * 0.32),
-            WELCOME_CARD_WIDTH.min((terminal_panel.width - 40.0).max(240.0)),
-            WELCOME_CARD_HEIGHT
-                .min((terminal_panel.height - TERMINAL_HEADER_HEIGHT - 32.0).max(140.0)),
-        );
-        push_quad(&mut chrome, card, state.theme.panel_section_bg);
-        push_quad(
-            &mut chrome,
-            Rect::new(card.x, card.y, card.width, 2.0),
-            state.theme.accent,
-        );
-        push_text(
-            &mut chrome,
-            Rect::new(card.x + 20.0, card.y + 18.0, card.width - 40.0, 26.0),
-            truncate_text(welcome.title.as_str(), 42),
-            state.theme.text_primary,
-            TextAlign::Left,
-        );
-        push_text(
-            &mut chrome,
-            Rect::new(card.x + 20.0, card.y + 48.0, card.width - 40.0, 24.0),
-            truncate_text(welcome.subtitle.as_str(), 80),
-            state.theme.text_secondary,
-            TextAlign::Left,
-        );
-
-        let mut hint_y = card.y + 88.0;
-        for hint in &welcome.hints {
-            push_text(
-                &mut chrome,
-                Rect::new(card.x + 20.0, hint_y, card.width - 40.0, 22.0),
-                format!("> {}", truncate_text(hint.as_str(), 76)),
-                state.theme.text_primary,
-                TextAlign::Left,
-            );
-            hint_y += 26.0;
+            row_y += BUTTON_HEIGHT + 6.0;
         }
     }
 
     let status_text = format!(
-        "{}  |  {}x{}  |  {}  |  {}{}",
+        "{} | {}x{} | {}{}",
         state.status.shell_label,
         state.status.terminal_cols,
         state.status.terminal_rows,
@@ -788,11 +575,10 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         } else {
             "Live"
         },
-        state.status.theme_name,
         state
             .status
             .exit_code
-            .map(|code| format!("  |  Exit {}", code))
+            .map(|code| format!(" | Exit {}", code))
             .unwrap_or_default()
     );
     push_text(
@@ -800,7 +586,7 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
         Rect::new(
             16.0,
             status_bar.y,
-            state.window_width * 0.68,
+            state.window_width * 0.56,
             status_bar.height,
         ),
         status_text,
@@ -810,12 +596,12 @@ pub fn build_ui_model(state: &UiBuildState) -> UiModel {
     push_text(
         &mut chrome,
         Rect::new(
-            state.window_width * 0.68,
+            state.window_width * 0.58,
             status_bar.y,
-            state.window_width * 0.30 - 16.0,
+            state.window_width * 0.40 - 16.0,
             status_bar.height,
         ),
-        "Ctrl+Shift+T New Tab  |  Ctrl+Shift+C/V Copy & Paste".to_string(),
+        "Ctrl+Shift+T | Ctrl+Shift+C/V".to_string(),
         state.theme.text_secondary,
         TextAlign::Right,
     );
@@ -860,6 +646,12 @@ fn push_button(
 /// 追加一条横向边界线
 fn push_border_line(chrome: &mut ChromeScene, y: f32, width: f32, color: Color) {
     push_quad(chrome, Rect::new(0.0, y, width, 1.0), color);
+}
+
+/// 估算紧凑标签页宽度，避免过短和过长
+fn compute_tab_width(title: &str) -> f32 {
+    let char_count = title.chars().count() as f32;
+    (char_count * 9.0 + 48.0).clamp(118.0, 220.0)
 }
 
 /// 按字符数截断标签和说明文本，避免 UI 文本把布局撑坏
