@@ -16,6 +16,9 @@ pub enum ShortcutAction {
     ResetFontSize,
     ToggleSettings,
     SwitchTheme,
+    Search,
+    SearchNext,
+    SearchPrevious,
 }
 
 /// 快捷键绑定
@@ -94,6 +97,20 @@ impl ShortcutManager {
         bindings.insert(
             Shortcut::new("P", true, true, false),
             ShortcutAction::SwitchTheme,
+        );
+
+        // 搜索
+        bindings.insert(
+            Shortcut::new("F", true, false, false),
+            ShortcutAction::Search,
+        );
+        bindings.insert(
+            Shortcut::new("F3", false, false, false),
+            ShortcutAction::SearchNext,
+        );
+        bindings.insert(
+            Shortcut::new("F3", false, true, false),
+            ShortcutAction::SearchPrevious,
         );
 
         Self { bindings }
@@ -201,6 +218,9 @@ fn parse_action(s: &str) -> Option<ShortcutAction> {
         "reset_font_size" => Some(ShortcutAction::ResetFontSize),
         "toggle_settings" => Some(ShortcutAction::ToggleSettings),
         "switch_theme" => Some(ShortcutAction::SwitchTheme),
+        "search" => Some(ShortcutAction::Search),
+        "search_next" => Some(ShortcutAction::SearchNext),
+        "search_previous" => Some(ShortcutAction::SearchPrevious),
         _ => None,
     }
 }

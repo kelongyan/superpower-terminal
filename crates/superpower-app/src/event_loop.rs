@@ -14,6 +14,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::config::Config;
+use crate::search::SearchState;
 use crate::shortcuts::{ShortcutAction, ShortcutManager};
 use crate::ui::{
     build_ui_model, AppTheme, StatusView, TabView, ThemePreset, UiAction, UiBuildState, UiModel,
@@ -76,6 +77,8 @@ struct TerminalTab {
     shell_exited: bool,
     /// shell 最近一次退出码
     shell_exit_code: Option<i32>,
+    /// 搜索状态
+    search_state: Option<SearchState>,
 }
 
 impl TerminalTab {
@@ -120,6 +123,7 @@ impl TerminalTab {
             pressed_mouse_button: None,
             shell_exited: false,
             shell_exit_code: None,
+            search_state: None,
         })
     }
 
@@ -412,6 +416,9 @@ impl App {
             ShortcutAction::ResetFontSize => self.reset_font_size(),
             ShortcutAction::ToggleSettings => self.toggle_settings(),
             ShortcutAction::SwitchTheme => self.switch_theme(),
+            ShortcutAction::Search => self.toggle_search(),
+            ShortcutAction::SearchNext => self.search_next(),
+            ShortcutAction::SearchPrevious => self.search_previous(),
         }
     }
 
@@ -491,6 +498,94 @@ impl App {
         self.settings_open = !self.settings_open;
         self.refresh_ui_model();
         self.request_redraw();
+    }
+
+    /// 切换搜索模式
+    fn toggle_search(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        if tab.search_state.is_some() {
+            // 关闭搜索
+            tab.search_state = None;
+            tab.terminal.terminal.damage.mark_full_redraw();
+        } else {
+            // 开启搜索
+            tab.search_state = Some(SearchState::new(String::new(), false, false));
+        }
+        
+        self.refresh_ui_model();
+        self.request_redraw();
+    }
+
+    /// 搜索下一个匹配
+    fn search_next(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        let mat = if let Some(search) = &mut tab.search_state {
+            search.next_match();
+            search.current().cloned()
+        } else {
+            None
+        };
+
+        if let Some(m) = mat {
+            self.scroll_to_search_match(&m);
+        }
+
+        if let Some(tab) = self.active_tab_mut() {
+            tab.terminal.terminal.damage.mark_full_redraw();
+        }
+        self.request_redraw();
+    }
+
+    /// 搜索上一个匹配
+    fn search_previous(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        let mat = if let Some(search) = &mut tab.search_state {
+            search.previous_match();
+            search.current().cloned()
+        } else {
+            None
+        };
+
+        if let Some(m) = mat {
+            self.scroll_to_search_match(&m);
+        }
+
+        if let Some(tab) = self.active_tab_mut() {
+            tab.terminal.terminal.damage.mark_full_redraw();
+        }
+        self.request_redraw();
+    }
+
+    /// 滚动到搜索匹配位置
+    fn scroll_to_search_match(&mut self, mat: &crate::search::SearchMatch) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        let scrollback_len = tab.terminal.terminal.grid.scrollback_len();
+        let visible_rows = tab.terminal.terminal.grid.rows();
+
+        if mat.row < scrollback_len {
+            // 匹配在 scrollback 中
+            let offset = scrollback_len - mat.row;
+            tab.terminal.terminal.grid.scroll_display_up(offset);
+        } else {
+            // 匹配在可见区域
+            let visible_row = mat.row - scrollback_len;
+            if visible_row >= visible_rows {
+                // 超出可见范围，滚动到底部
+                tab.terminal.terminal.grid.reset_display_offset();
+            }
+        }
     }
 
     /// 应用新的主题预设，并同步 terminal 与 renderer 的默认颜色
