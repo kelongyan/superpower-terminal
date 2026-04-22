@@ -995,33 +995,19 @@ impl Renderer {
             return;
         }
 
-        let directwrite_glyph = self
-            .fonts
-            .get(key.font_index)
-            .and_then(|font| font.dw_rasterizer.as_ref())
-            .filter(|dw| dw.has_glyph(character))
-            .and_then(|dw| dw.rasterize(character));
-
-        let (width, height, offset_x, offset_y, bitmap) = if let Some(glyph) = directwrite_glyph {
-            (
-                glyph.width,
-                glyph.height,
-                glyph.offset_x,
-                glyph.offset_y,
-                glyph.bitmap,
-            )
-        } else {
-            // DirectWrite 无法覆盖时，退回现有 fontdue fallback 链。
-            let selected_font = &self.fonts[key.font_index].font;
-            let (metrics, bitmap) = selected_font.rasterize(character, font_size);
-            (
-                metrics.width as u32,
-                metrics.height as u32,
-                metrics.xmin,
-                ((self.cell_height - metrics.height as f32) - metrics.ymin as f32).round() as i32,
-                bitmap,
-            )
-        };
+        // 当前真实机器上 DirectWrite 字形位图路径仍存在“返回空位图/低透明位图”的不稳定问题，
+        // 会直接导致 UI 文本和终端文本整批消失。
+        // 为了先确保桌面 UI 和终端可正常使用，这里统一回到稳定的 fontdue 位图路径；
+        // DirectWrite 暂时只保留度量和字体发现价值，等单独验证通过后再重新接回 glyph bitmap。
+        let selected_font = &self.fonts[key.font_index].font;
+        let (metrics, bitmap) = selected_font.rasterize(character, font_size);
+        let (width, height, offset_x, offset_y, bitmap) = (
+            metrics.width as u32,
+            metrics.height as u32,
+            metrics.xmin,
+            ((self.cell_height - metrics.height as f32) - metrics.ymin as f32).round() as i32,
+            bitmap,
+        );
 
         if width == 0 || height == 0 || bitmap.is_empty() {
             return;

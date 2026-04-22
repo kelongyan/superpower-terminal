@@ -203,14 +203,7 @@ impl DwRasterizer {
                 .ok()?
         };
         if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
-            return Some(DwGlyphBitmap {
-                width: 0,
-                height: 0,
-                offset_x: 0,
-                offset_y: 0,
-                advance_width,
-                bitmap: Vec::new(),
-            });
+            return None;
         }
 
         let width = (bounds.right - bounds.left) as u32;
@@ -229,6 +222,9 @@ impl DwRasterizer {
         // wgpu 这里使用的是 `R8Unorm`，如果不先放大到 0..255，
         // 实际渲染出来的文字会几乎透明，看起来像“只有背景块没有文字”。
         normalize_aliased_alpha_bitmap(&mut bitmap);
+        if bitmap.iter().all(|alpha| *alpha == 0) {
+            return None;
+        }
 
         Some(DwGlyphBitmap {
             width,

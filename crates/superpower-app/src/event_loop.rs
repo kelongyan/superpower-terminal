@@ -16,6 +16,7 @@ use winit::window::{Window, WindowAttributes};
 use crate::config::Config;
 use crate::ui::{
     build_ui_model, AppTheme, StatusView, TabView, ThemePreset, UiAction, UiBuildState, UiModel,
+    WelcomeView,
 };
 
 /// 选择拖拽模式
@@ -83,13 +84,16 @@ impl TerminalTab {
         config: &Config,
         theme: &AppTheme,
     ) -> Result<Self, String> {
-        let terminal = TerminalHandler::with_theme(
+        let mut terminal = TerminalHandler::with_theme(
             rows,
             cols,
             config.scrollback.limit,
             theme.terminal_foreground,
             theme.terminal_background,
         );
+        // 在 shell prompt 到来前先写入一段欢迎信息，让首屏更像完整产品而不是空白终端。
+        terminal.process(startup_banner(shell_label(config.shell.program.as_str())).as_bytes());
+        terminal.terminal.damage.mark_full_redraw();
         let pty = PtySession::new(
             cols as u16,
             rows as u16,
@@ -164,6 +168,18 @@ impl App {
             tabs: Vec::new(),
             active_tab: 0,
             font_size: config.font.size,
+            active_title: "Booting SuperPower".to_string(),
+            active_subtitle: "Preparing terminal window and shell session".to_string(),
+            welcome: Some(WelcomeView {
+                title: "SuperPower Terminal".to_string(),
+                subtitle: "Preparing renderer, PTY session and desktop shell".to_string(),
+                hints: vec![
+                    "The first prompt will appear here after the terminal session is ready."
+                        .to_string(),
+                    "If the window launches blank, SuperPower now requests an immediate first redraw."
+                        .to_string(),
+                ],
+            }),
             status: StatusView {
                 shell_label: shell_label(config.shell.program.as_str()),
                 terminal_cols: 0,
@@ -206,6 +222,13 @@ impl App {
         self.tabs.get_mut(self.active_tab)
     }
 
+    /// 主动请求窗口重绘，避免首帧或状态切换后停留在系统默认白屏
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// 同步 renderer 缓存出来的像素度量
     fn update_cached_metrics(&mut self) {
         if let Some(renderer) = &self.renderer {
@@ -242,6 +265,66 @@ impl App {
         }
     }
 
+    /// 构建终端面板头部标题
+    fn active_title(&self) -> String {
+        self.active_tab()
+            .map(|tab| tab.title.clone())
+            .unwrap_or_else(|| "No Active Session".to_string())
+    }
+
+    /// 构建终端面板头部副标题
+    fn active_subtitle(&self) -> String {
+        match self.active_tab() {
+            Some(tab) if tab.shell_exited => format!(
+                "{} exited with code {}",
+                shell_label(self.config.shell.program.as_str()),
+                tab.shell_exit_code.unwrap_or(-1)
+            ),
+            Some(tab) if tab.terminal.terminal.grid.is_scrolled() => format!(
+                "{} session - browsing scrollback history",
+                shell_label(self.config.shell.program.as_str())
+            ),
+            Some(_) => format!(
+                "{} session - ready for commands and terminal interaction",
+                shell_label(self.config.shell.program.as_str())
+            ),
+            None => "Waiting for terminal session".to_string(),
+        }
+    }
+
+    /// 当前终端是否已经产生了可见内容
+    fn terminal_has_meaningful_content(&self) -> bool {
+        self.active_tab().is_some_and(|tab| {
+            tab.terminal
+                .terminal
+                .grid
+                .visible_lines()
+                .iter()
+                .flat_map(|row| row.iter())
+                .any(|cell| cell.character != ' ' && cell.character != '\0')
+        })
+    }
+
+    /// 在终端尚未有实际输出时，展示一张欢迎卡片帮助用户理解当前能力
+    fn welcome_view(&self) -> Option<WelcomeView> {
+        if self.terminal_has_meaningful_content() {
+            return None;
+        }
+
+        Some(WelcomeView {
+            title: "SuperPower Terminal is ready".to_string(),
+            subtitle: format!(
+                "Your {} session is starting. Once the prompt appears, you can type commands directly in the terminal area.",
+                shell_label(self.config.shell.program.as_str())
+            ),
+            hints: vec![
+                "Click inside the terminal panel to focus input and start typing.".to_string(),
+                "Use Ctrl+Shift+T to open a new tab, and Ctrl+Shift+C / Ctrl+Shift+V to copy or paste.".to_string(),
+                "Open the right panel to change theme, adjust font size, clear the screen, or jump back to the bottom.".to_string(),
+            ],
+        })
+    }
+
     /// 统一重建 UI 布局，并在必要时同步终端行列尺寸
     fn refresh_ui_model(&mut self) {
         let Some(window) = &self.window else {
@@ -268,6 +351,9 @@ impl App {
             tabs: self.tab_views(),
             active_tab: self.active_tab,
             font_size,
+            active_title: self.active_title(),
+            active_subtitle: self.active_subtitle(),
+            welcome: self.welcome_view(),
             status: self.status_view(current_rows, current_cols),
         });
         let (rows, cols) = {
@@ -299,6 +385,9 @@ impl App {
             tabs: self.tab_views(),
             active_tab: self.active_tab,
             font_size,
+            active_title: self.active_title(),
+            active_subtitle: self.active_subtitle(),
+            welcome: self.welcome_view(),
             status: self.status_view(rows, cols),
         });
 
@@ -309,6 +398,7 @@ impl App {
         self.update_cached_metrics();
         self.ui_dirty = true;
         self.update_window_title();
+        self.request_redraw();
     }
 
     /// 创建一个新的终端标签页并切换过去
@@ -317,7 +407,11 @@ impl App {
             return;
         };
         let (rows, cols) = renderer.terminal_size();
-        let title = format!("Shell {}", self.tabs.len() + 1);
+        let title = format!(
+            "{} {}",
+            shell_label(self.config.shell.program.as_str()),
+            self.tabs.len() + 1
+        );
 
         match TerminalTab::new(title, rows, cols, &self.config, &self.theme) {
             Ok(tab) => {
@@ -902,6 +996,7 @@ impl ApplicationHandler for App {
         self.update_cached_metrics();
         self.refresh_ui_model();
         self.create_tab();
+        self.request_redraw();
     }
 
     fn window_event(
@@ -1267,6 +1362,14 @@ fn shell_label(program: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(program)
         .to_string()
+}
+
+/// 构建新标签页首屏欢迎横幅
+fn startup_banner(shell_name: String) -> String {
+    format!(
+        "[SuperPower] Desktop terminal ready\r\n[SuperPower] Shell: {}\r\n[SuperPower] Ctrl+Shift+T new tab | Ctrl+Shift+C/V copy/paste\r\n\r\n",
+        shell_name
+    )
 }
 
 /// 处理键盘输入
@@ -1640,5 +1743,13 @@ mod tests {
     fn shell_label_uses_file_name() {
         assert_eq!(shell_label("C:\\Windows\\System32\\cmd.exe"), "cmd.exe");
         assert_eq!(shell_label("powershell"), "powershell");
+    }
+
+    /// 验证新标签页欢迎横幅会包含 shell 名称与快捷键提示
+    #[test]
+    fn startup_banner_contains_shell_and_shortcuts() {
+        let banner = startup_banner("cmd.exe".to_string());
+        assert!(banner.contains("cmd.exe"));
+        assert!(banner.contains("Ctrl+Shift+T"));
     }
 }
