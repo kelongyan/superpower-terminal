@@ -14,6 +14,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowAttributes};
 
 use crate::config::Config;
+use crate::shortcuts::{ShortcutAction, ShortcutManager};
 use crate::ui::{
     build_ui_model, AppTheme, StatusView, TabView, ThemePreset, UiAction, UiBuildState, UiModel,
 };
@@ -152,6 +153,10 @@ struct App {
     /// 布局 padding（物理像素）
     padding_x: f32,
     padding_y: f32,
+    /// 快捷键管理器
+    shortcut_manager: ShortcutManager,
+    /// 初始字号（用于重置）
+    initial_font_size: f32,
 }
 
 impl App {
@@ -159,6 +164,12 @@ impl App {
     fn new() -> Self {
         let config = crate::config::Config::load_from_file(&crate::config::Config::config_path());
         let theme = AppTheme::from_preset(ThemePreset::GraphiteDark);
+        let shortcut_manager = if config.shortcuts.is_empty() {
+            ShortcutManager::default()
+        } else {
+            ShortcutManager::from_config(&config.shortcuts)
+        };
+        let initial_font_size = config.font.size;
         let ui_model = build_ui_model(&UiBuildState {
             window_width: config.window.width as f32,
             window_height: config.window.height as f32,
@@ -196,6 +207,8 @@ impl App {
             cell_height: 0.0,
             padding_x: 0.0,
             padding_y: 0.0,
+            shortcut_manager,
+            initial_font_size,
         }
     }
 
@@ -367,6 +380,101 @@ impl App {
             self.active_tab = self.tabs.len().saturating_sub(1);
         }
         self.refresh_ui_model();
+    }
+
+    /// 处理快捷键动作
+    fn handle_shortcut_action(&mut self, action: ShortcutAction) {
+        match action {
+            ShortcutAction::Copy => self.copy_selection(),
+            ShortcutAction::Paste => self.paste_clipboard(),
+            ShortcutAction::NewTab => self.create_tab(),
+            ShortcutAction::CloseTab => self.close_tab(self.active_tab),
+            ShortcutAction::NextTab => self.switch_to_next_tab(),
+            ShortcutAction::PreviousTab => self.switch_to_previous_tab(),
+            ShortcutAction::IncreaseFontSize => self.increase_font_size(),
+            ShortcutAction::DecreaseFontSize => self.decrease_font_size(),
+            ShortcutAction::ResetFontSize => self.reset_font_size(),
+            ShortcutAction::ToggleSettings => self.toggle_settings(),
+            ShortcutAction::SwitchTheme => self.switch_theme(),
+        }
+    }
+
+    /// 切换到下一个标签页
+    fn switch_to_next_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.refresh_ui_model();
+        self.request_redraw();
+    }
+
+    /// 切换到上一个标签页
+    fn switch_to_previous_tab(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active_tab = if self.active_tab == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab - 1
+        };
+        self.refresh_ui_model();
+        self.request_redraw();
+    }
+
+    /// 增加字号
+    fn increase_font_size(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            let current_size = renderer.font_size();
+            let new_size = (current_size + 1.0).min(48.0);
+            renderer.set_font_size(new_size);
+            self.update_cached_metrics();
+            self.refresh_ui_model();
+            self.request_redraw();
+        }
+    }
+
+    /// 减小字号
+    fn decrease_font_size(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            let current_size = renderer.font_size();
+            let new_size = (current_size - 1.0).max(8.0);
+            renderer.set_font_size(new_size);
+            self.update_cached_metrics();
+            self.refresh_ui_model();
+            self.request_redraw();
+        }
+    }
+
+    /// 重置字号到初始值
+    fn reset_font_size(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_font_size(self.initial_font_size);
+            self.update_cached_metrics();
+            self.refresh_ui_model();
+            self.request_redraw();
+        }
+    }
+
+    /// 切换主题
+    fn switch_theme(&mut self) {
+        self.theme = AppTheme::from_preset(self.theme.preset.next());
+        let fg = self.theme.terminal_foreground;
+        let bg = self.theme.terminal_background;
+        if let Some(tab) = self.active_tab_mut() {
+            tab.terminal.terminal.update_theme(fg, bg);
+            tab.terminal.terminal.damage.mark_full_redraw();
+        }
+        self.refresh_ui_model();
+        self.request_redraw();
+    }
+
+    /// 切换设置面板
+    fn toggle_settings(&mut self) {
+        self.settings_open = !self.settings_open;
+        self.refresh_ui_model();
+        self.request_redraw();
     }
 
     /// 应用新的主题预设，并同步 terminal 与 renderer 的默认颜色
@@ -988,29 +1096,18 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if self.ctrl_pressed && self.shift_pressed {
-                    use winit::keyboard::KeyCode;
+                use winit::keyboard::PhysicalKey;
 
-                    if let winit::keyboard::PhysicalKey::Code(keycode) = event.physical_key {
-                        match keycode {
-                            KeyCode::KeyC => {
-                                self.copy_selection();
-                                return;
-                            }
-                            KeyCode::KeyV => {
-                                self.paste_clipboard();
-                                return;
-                            }
-                            KeyCode::KeyT => {
-                                self.create_tab();
-                                return;
-                            }
-                            KeyCode::KeyW => {
-                                self.close_tab(self.active_tab);
-                                return;
-                            }
-                            _ => {}
-                        }
+                if let PhysicalKey::Code(keycode) = event.physical_key {
+                    let modifiers = winit::keyboard::ModifiersState::from_bits_truncate(
+                        (self.ctrl_pressed as u32) << 3
+                            | (self.shift_pressed as u32) << 0
+                            | (self.alt_pressed as u32) << 1,
+                    );
+
+                    if let Some(action) = self.shortcut_manager.find_action(keycode, modifiers) {
+                        self.handle_shortcut_action(action);
+                        return;
                     }
                 }
 

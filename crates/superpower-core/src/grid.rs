@@ -141,6 +141,7 @@ impl Grid {
                 std::mem::replace(&mut self.lines[0], new_row(self.cols, &self.template_cell));
             if self.scrollback_limit > 0 {
                 self.scrollback.push(removed);
+                // 自动清理超出限制的 scrollback 行，防止内存无限增长
                 while self.scrollback.len() > self.scrollback_limit {
                     self.scrollback.remove(0);
                 }

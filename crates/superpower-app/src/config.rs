@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// 终端配置
 #[derive(Debug, Default, Deserialize)]
@@ -13,6 +14,8 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     #[serde(default)]
     pub colors: ColorsConfig,
+    #[serde(default)]
+    pub shortcuts: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
