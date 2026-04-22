@@ -85,6 +85,8 @@ pub struct Cell {
     pub background: Color,
     /// 标志位
     pub flags: CellFlags,
+    /// 超链接 URL（如果有）
+    pub hyperlink: Option<String>,
 }
 
 impl Cell {
@@ -95,12 +97,19 @@ impl Cell {
             foreground,
             background,
             flags: CellFlags::EMPTY,
+            hyperlink: None,
         }
     }
 
     /// 创建带默认颜色的空 Cell
     pub fn new(character: char) -> Self {
-        Self::with_colors(character, Color::DEFAULT_FG, Color::DEFAULT_BG)
+        Self {
+            character,
+            foreground: Color::DEFAULT_FG,
+            background: Color::DEFAULT_BG,
+            flags: CellFlags::EMPTY,
+            hyperlink: None,
+        }
     }
 
     /// 创建空白 Cell（空格）
@@ -124,6 +133,7 @@ impl Cell {
         self.foreground = foreground;
         self.background = background;
         self.flags = CellFlags::EMPTY;
+        self.hyperlink = None;
     }
 
     pub fn is_wide(&self) -> bool {

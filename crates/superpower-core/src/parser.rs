@@ -254,6 +254,7 @@ impl Terminal {
             foreground: self.foreground,
             background: self.background,
             flags: self.cell_flags,
+            hyperlink: None,
         }
     }
 
